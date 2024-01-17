@@ -20,24 +20,39 @@ class PtrFind (gdb.Command):
     parser.add_argument('find_region', metavar="<destination region>")
     parser.add_argument('--chain', action='store_true', help="enables leak-chains")
     parser.add_argument('--leaks', action='store_true', help="look for outgoing leaks in the provided section. The destination region will be ignored")
-    parser.add_argument('-f', '--from', metavar="<Search region>", help="Where to look")
+    parser.add_argument('-f', '--from', dest="start_region", metavar="<Search region>", help="Where to look")
     
     args = parser.parse_args(gdb.string_to_argv(arg))
 
-    # Step 1: parse destination region
+    # Step 1: --chain and --leaks can both be provided
+    if args.chain and args.leaks:
+      print("[-] both --leaks and --chain were provided, please provide only one of them")
+      return
+
+    # Step 2: parse destination region
+    proc_mapping = PtrFind.create_proc_map()
     try:
-      destination = PtrFind.parse_addr_region(args.find_region)
+      destination = PtrFind.parse_addr_region(proc_mapping, args.find_region)
     except SyntaxError:
       print("[-] Failed to parse destination range")
       return
     
     print(f"start: {hex(destination[0])}; end: {hex(destination[1])}")
-    PtrFind.get_procs()
     
-    # Step 2: parse from
-    # TODO
+    # Step 3: parse from
+    start = None
+    if args.start_region is not None:
+      try:
+        start = PtrFind.parse_addr_region(proc_mapping, args.start_region)
+      except SyntaxError:
+        print("[-] Failed to parse from-range")
+        return
+      print(f"start: {hex(start[0])}; end: {hex(start[1])}")
+    else:
+      print("No from provided")
+    
 
-    # Step 3: parse mode
+    # Step 4: parse mode
     if args.chain:
        print("Leak-chains active")
     elif args.leaks:
@@ -45,16 +60,15 @@ class PtrFind (gdb.Command):
     else:
        print("Normal mode")
 
-  def parse_addr_region(destination):     
+  def parse_addr_region(proc_mapping, destination):     
     destination_start = 0
     destination_end = 0
-    if destination in ["heap", "stack", "libc"]:
-      proc_mapping = PtrFind.get_procs()
-      
+    if destination in ["heap", "stack", "libc", "image"]:      
       for objfile in proc_mapping:
         if destination == "libc" and "libc.so" in objfile.name \
             or destination == "heap" and objfile.name == "[heap]" \
-            or destination == "stack" and objfile.name == "[stack]":
+            or destination == "stack" and objfile.name == "[stack]" \
+            or destination == "image" and objfile.name == gdb.current_progspace().filename:
           destination_start = objfile.segments[0].start
           destination_end = objfile.segments[len(objfile.segments) - 1].end
           return (destination_start, destination_end)
@@ -69,6 +83,15 @@ class PtrFind (gdb.Command):
       destination_start = int(destination[0], 0)
       destination_end = destination_start + int(destination[1], 0)
     else:
+      # Last case: This is the exact name of an objfile mapped in the current program
+      # e.g. "/usr/lib64/ld-linux-x86-64.so.2" and "ld-linux-x86-64.so.2" will both work.
+      for objfile in proc_mapping:
+        if destination == objfile.name or ('/' in objfile.name and destination == objfile.name.rsplit('/', 1)[1]):
+          destination_start = objfile.segments[0].start
+          destination_end = objfile.segments[len(objfile.segments) - 1].end
+          return (destination_start, destination_end)
+        
+      # Well, tough luck I guess
       raise SyntaxError()
     
     return (destination_start, destination_end)
@@ -84,7 +107,7 @@ class PtrFind (gdb.Command):
     
     gdb builtin get objfiles/ get spaces doesn't return what we expect
     '''
-  def get_procs():
+  def create_proc_map():
     '''Manually parse the output of `i proc m` into something that we can understand'''
     mappings_output = gdb.execute("info proc mappings", to_string=True).splitlines()[4:]
     

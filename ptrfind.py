@@ -12,19 +12,20 @@ class PtrFind (gdb.Command):
   COLOR_OK = "\033[92m"  # GREEN
   COLOR_WARNING = "\033[93m"  # YELLOW
   COLOR_FAIL = "\033[91m"  # RED
-  COLOR_RESET = "\033[0m"  # RESET COLOR
+  COLOR_BOLD = "\033[1m"
+  COLOR_RESET = "\033[0m"
 
   def __init__ (self):
     super (PtrFind, self).__init__ ("ptrfind", gdb.COMMAND_USER)
 
   def print_msg(msg):
-    print(PtrFind.COLOR_OK + "[+] " + PtrFind.COLOR_RESET + msg)
+    print(PtrFind.COLOR_OK + PtrFind.COLOR_BOLD + "[+] " + PtrFind.COLOR_RESET + msg)
 
   def print_error(msg):
-    print(PtrFind.COLOR_FAIL + "[-] " + PtrFind.COLOR_RESET + msg)
+    print(PtrFind.COLOR_FAIL + PtrFind.COLOR_BOLD + "[-] " + PtrFind.COLOR_RESET + msg)
 
   def print_warning(msg):
-    print(PtrFind.COLOR_WARNING + "[!] " + PtrFind.COLOR_RESET + msg)
+    print(PtrFind.COLOR_WARNING + PtrFind.COLOR_BOLD + "[!] " + PtrFind.COLOR_RESET + msg)
 
   def invoke (self, arg, from_tty):
     parser = argparse.ArgumentParser(
@@ -74,15 +75,15 @@ class PtrFind (gdb.Command):
       PtrFind.find_pointers(start, destination)
 
 
-  def pretty_print_region(region, addr):
+  def pretty_print_addr(addr):
     '''Returns the name of the region. If the address in that region has a debug symbol, attach the name to it'''
     symbol = gdb.execute(f"info symbol {hex(addr)}", to_string=True)
-    if symbol.startswith("No symbol"):
-      return region.name
-    else:
+    result = PtrFind.COLOR_BOLD + hex(addr) + PtrFind.COLOR_RESET
+    if not symbol.startswith("No symbol"):
       # We have a symbol
       symbol = symbol.split(" ", 3) 
-      return region.name + f" ({PtrFind.COLOR_WARNING + symbol[0] + PtrFind.COLOR_RESET}{('+' + symbol[2]) if symbol[1] == '+' else ''})"
+      result += f" ({PtrFind.COLOR_WARNING + symbol[0] + PtrFind.COLOR_RESET}{('+' + symbol[2]) if symbol[1] == '+' else ''})"
+    return result
 
 
   def find_pointers(search_range, proc_mapping):
@@ -96,11 +97,14 @@ class PtrFind (gdb.Command):
           
           region = PtrFind.get_region(proc_mapping, val)
           if region is not None:
-            PtrFind.print_msg(f"Pointer to {PtrFind.pretty_print_region(region, addr)} found at {hex(addr)}")
+            PtrFind.print_msg(f"Pointer to {PtrFind.COLOR_BOLD + region.name + PtrFind.COLOR_RESET} found at {PtrFind.pretty_print_addr(addr)}")
 
 
   def get_region(proc_mapping, addr, binary_search=True):
-    '''Returns the region that this address belongs to. Returns None if it does not belong to any'''
+    '''Returns the region that this address belongs to. Returns None if it does not belong to any
+      2 Versions that are similar in speed 
+      TODO: more benchmarking
+    '''
     if binary_search:
       start_index = 0
       end_index = len(proc_mapping) - 1
@@ -197,20 +201,24 @@ class PtrFind (gdb.Command):
       raise SyntaxError()
 
     # We land here if we provided an address range
+    # We'll now fake a proc_mapping that contains just the segments inside the user provided range
+
+
 
     def in_range(region): # if the region is fully inside the range, starting inside the range, or ending inside the range. Also, the range might be inside the region
       return (destination_start <= region.start and destination_end >= region.end) or \
       (destination_end > region.start and destination_end < region.end) or \
       (destination_start >= region.start and destination_start <= region.end) or \
       (destination_start >= region.start and destination_end <= region.end)
-      
 
+        
     destination_mapping = list(filter(in_range, copy.deepcopy(proc_mapping)))
 
     if(len(destination_mapping) == 0):
       PtrFind.print_error("Provided address range is unmapped")
       raise SyntaxError
  
+    # cut of the contained objfiles and segments at the boundary 
     for objfile in destination_mapping:
       objfile.name = "user-defined region in " + objfile.name
       objfile.segments = list(filter(in_range, objfile.segments))

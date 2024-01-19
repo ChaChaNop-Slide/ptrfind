@@ -9,8 +9,22 @@ from types import SimpleNamespace
 import copy
 
 class PtrFind (gdb.Command):
+  COLOR_OK = "\033[92m"  # GREEN
+  COLOR_WARNING = "\033[93m"  # YELLOW
+  COLOR_FAIL = "\033[91m"  # RED
+  COLOR_RESET = "\033[0m"  # RESET COLOR
+
   def __init__ (self):
     super (PtrFind, self).__init__ ("ptrfind", gdb.COMMAND_USER)
+
+  def print_msg(msg):
+    print(PtrFind.COLOR_OK + "[+] " + PtrFind.COLOR_RESET + msg)
+
+  def print_error(msg):
+    print(PtrFind.COLOR_FAIL + "[-] " + PtrFind.COLOR_RESET + msg)
+
+  def print_warning(msg):
+    print(PtrFind.COLOR_WARNING + "[!] " + PtrFind.COLOR_RESET + msg)
 
   def invoke (self, arg, from_tty):
     parser = argparse.ArgumentParser(
@@ -27,7 +41,7 @@ class PtrFind (gdb.Command):
 
     # Step 1: --chain and --leaks can both be provided
     if args.chain and args.leaks:
-      print("[-] both --leaks and --chain were provided, please provide only one of them")
+      PtrFind.print_error("both --leaks and --chain were provided, please provide only one of them")
       return
 
     # Step 2: parse destination region
@@ -35,7 +49,7 @@ class PtrFind (gdb.Command):
     try:
       destination = PtrFind.parse_addr_region(proc_mapping, args.find_region)
     except SyntaxError:
-      print("[-] Failed to parse destination range")
+      PtrFind.print_error("Failed to parse destination range")
       return
     
         
@@ -45,7 +59,7 @@ class PtrFind (gdb.Command):
       try:
         start = PtrFind.parse_addr_region(proc_mapping, args.start_region)
       except SyntaxError:
-        print("[-] Failed to parse from-range")
+        PtrFind.print_error("Failed to parse from-range")
         return
     
 
@@ -68,7 +82,7 @@ class PtrFind (gdb.Command):
     else:
       # We have a symbol
       symbol = symbol.split(" ", 3) 
-      return region.name + f" ({symbol[0]}{('+' + symbol[2]) if symbol[1] == '+' else ''})"
+      return region.name + f" ({PtrFind.COLOR_WARNING + symbol[0] + PtrFind.COLOR_RESET}{('+' + symbol[2]) if symbol[1] == '+' else ''})"
 
 
   def find_pointers(search_range, proc_mapping):
@@ -78,11 +92,11 @@ class PtrFind (gdb.Command):
           try:
             val = PtrFind.deref(addr)
           except gdb.MemoryError:
-            print(f"[-] Unable to access value at {hex(addr)}")
+            PtrFind.print_error(f"Unable to access value at {hex(addr)}")
           
           region = PtrFind.get_region(proc_mapping, val)
           if region is not None:
-            print(f"[+] Pointer to {PtrFind.pretty_print_region(region, addr)} found at {hex(addr)}")
+            PtrFind.print_msg(f"Pointer to {PtrFind.pretty_print_region(region, addr)} found at {hex(addr)}")
 
 
   def get_region(proc_mapping, addr, binary_search=True):
@@ -143,23 +157,23 @@ class PtrFind (gdb.Command):
             or destination == "stack" and objfile.name == "[stack]" \
             or destination == "image" and objfile.name == gdb.current_progspace().filename:
           return [objfile]
-      print("[-] Failed to find region, please use address ranges manually")
+      PtrFind.print_error("Failed to find region, please use address ranges manually")
       raise SyntaxError()
     elif destination == "tls":
       frame = gdb.newest_frame()
       if frame.architecture().name() != "i386:x86-64":
-        print(f"[-] TLS is currently only supported on x86-64 (found {frame.architecture().name()}), please use manual address ranges")
+        PtrFind.print_error(f"TLS is currently only supported on x86-64 (found {frame.architecture().name()}), please use manual address ranges")
         raise SyntaxError()
       
       fs_base = frame.read_register("fs_base").const_value()
       try:
         val = PtrFind.deref(fs_base)
       except gdb.MemoryError:
-        print("[-] Failed to find TLS. Reason: $fs_base points to an invalid address. Please use manual address ranges")
+        PtrFind.print_error("Failed to find TLS. Reason: $fs_base points to an invalid address. Please use manual address ranges")
         raise SyntaxError
 
       if val != fs_base:
-        print("[!] TLS parsing might have failed, proceed with caution. Reason: Start of TLS does not contain a self-reference")
+        PtrFind.print_warning("TLS parsing might have failed, proceed with caution. Reason: Start of TLS does not contain a self-reference")
       
       tls = PtrFind.get_region(proc_mapping, fs_base)
       tls.name = "[tls]"
@@ -194,7 +208,7 @@ class PtrFind (gdb.Command):
     destination_mapping = list(filter(in_range, copy.deepcopy(proc_mapping)))
 
     if(len(destination_mapping) == 0):
-      print("[-] Provided address range is unmapped")
+      PtrFind.print_error("Provided address range is unmapped")
       raise SyntaxError
  
     for objfile in destination_mapping:

@@ -45,8 +45,13 @@ class PtrFind (gdb.Command):
       PtrFind.print_error("both --leaks and --chain were provided, please provide only one of them")
       return
 
+    try:
+      proc_mapping = PtrFind.create_proc_map()
+    except gdb.error as e:
+      PtrFind.print_error("Couldn't get process map. Is no program running?")
+      return
+
     # Step 2: parse destination region
-    proc_mapping = PtrFind.create_proc_map()
     try:
       destination = PtrFind.parse_addr_region(proc_mapping, args.find_region)
     except SyntaxError:
@@ -75,14 +80,15 @@ class PtrFind (gdb.Command):
       PtrFind.find_pointers(start, destination)
 
 
-  def pretty_print_addr(addr):
+  def pretty_print_addr(addr, addr_region):
     '''Returns the name of the region. If the address in that region has a debug symbol, attach the name to it'''
     symbol = gdb.execute(f"info symbol {hex(addr)}", to_string=True)
-    result = PtrFind.COLOR_BOLD + hex(addr) + PtrFind.COLOR_RESET
+    result = PtrFind.COLOR_BOLD + hex(addr) + PtrFind.COLOR_RESET + f" ({PtrFind.COLOR_BOLD + addr_region.name + PtrFind.COLOR_RESET}"
     if not symbol.startswith("No symbol"):
       # We have a symbol
       symbol = symbol.split(" ", 3) 
-      result += f" ({PtrFind.COLOR_WARNING + symbol[0] + PtrFind.COLOR_RESET}{('+' + symbol[2]) if symbol[1] == '+' else ''})"
+      result += f", {PtrFind.COLOR_WARNING + symbol[0] + PtrFind.COLOR_RESET}{('+' + hex(int(symbol[2]))) if symbol[1] == '+' else ''}"
+    result += ")"
     return result
 
 
@@ -95,9 +101,9 @@ class PtrFind (gdb.Command):
           except gdb.MemoryError:
             PtrFind.print_error(f"Unable to access value at {hex(addr)}")
           
-          region = PtrFind.get_region(proc_mapping, val)
-          if region is not None:
-            PtrFind.print_msg(f"Pointer to {PtrFind.COLOR_BOLD + region.name + PtrFind.COLOR_RESET} found at {PtrFind.pretty_print_addr(addr)}")
+          val_region = PtrFind.get_region(proc_mapping, val)
+          if val_region is not None:
+            PtrFind.print_msg(f"Pointer to {PtrFind.COLOR_BOLD + val_region.name + PtrFind.COLOR_RESET} found at {PtrFind.pretty_print_addr(addr, region)}")
 
 
   def get_region(proc_mapping, addr, binary_search=True):
@@ -122,7 +128,7 @@ class PtrFind (gdb.Command):
           else:
             end_index = middle_index
           continue
-      
+    
       # Only two items left, does the second item match?
       if start_index != end_index and addr >= proc_mapping[end_index].start and addr < proc_mapping[end_index].end:
         return proc_mapping[end_index]

@@ -7,6 +7,7 @@ except ImportError:
 import argparse
 from types import SimpleNamespace
 import copy
+import time
 
 class PtrFind (gdb.Command):
   COLOR_OK = "\033[92m"  # GREEN
@@ -15,8 +16,8 @@ class PtrFind (gdb.Command):
   COLOR_BOLD = "\033[1m"
   COLOR_RESET = "\033[0m"
 
-  little_endian = "little endian" in gdb.execute("show endian", to_string=True)
-  pointer_size = gdb.lookup_type('void').pointer().sizeof
+  little_endian = None
+  pointer_size = None
   proc_mapping = None
   
 
@@ -42,8 +43,12 @@ class PtrFind (gdb.Command):
     parser.add_argument('--chain', action='store_true', help="enables leak-chains")
     parser.add_argument('--leaks', action='store_true', help="look for outgoing leaks in the provided section. The destination region will be ignored")
     parser.add_argument('-f', '--from', dest="start_region", metavar="<Search region>", help="Where to look")
+    parser.add_argument('-a', "--all", action='store_true', help="print all pointers instead of only the first matches")
+    parser.add_argument('-c', "--cache-all", action='store_true', help="also cache the pointers found in writeable sections (faster, but may lead to wrong/incomplete output)")
     
     args = parser.parse_args(gdb.string_to_argv(arg))
+    self.pointer_size = gdb.lookup_type('void').pointer().sizeof
+    self.little_endian = "little endian" in gdb.execute("show endian", to_string=True)
 
     # Step 1: --chain and --leaks can both be provided
     if args.chain and args.leaks:
@@ -74,32 +79,193 @@ class PtrFind (gdb.Command):
         PtrFind.print_error("Failed to parse from-range")
         return
     
+    '''
+    t1_start = time.perf_counter() 
+    self.find_pointers_efficient(start)
+    t1_stop = time.perf_counter()
+    print("Elapsed efficient time in seconds:",t1_stop-t1_start)
+    '''
 
+    def objfile_to_id(objfile): return objfile.id
+
+    memory_errors = 0
     # Step 4: parse mode
     if args.chain:
        print("Leak-chains active")
-    elif args.leaks:
-      PtrFind.find_pointers(destination, self.proc_mapping)
-    elif start is None: # from anywhere to ...
-      PtrFind.find_pointers(self.proc_mapping, destination)
-    else: # from ... to ...
-      PtrFind.find_pointers(start, destination)
+       memory_errors = self.find_pointers(self.proc_mapping)
+    else:
+      searched_regions = None
+      destination_regions = None
+      if args.leaks:
+        searched_regions = destination
+        destination_regions = self.proc_mapping
+        #PtrFind.find_pointers(destination, self.proc_mapping)
+      elif start is None: # from anywhere to ...
+        searched_regions = self.proc_mapping
+        destination_regions = destination
+        #PtrFind.find_pointers(self.proc_mapping, destination)
+      else: # from ... to ...
+        searched_regions = start
+        destination_regions = destination
+        #PtrFind.find_pointers(start, destination)
+
+      PtrFind.print_msg("Searching for pointers, this may take a few minutes")
+      
+      # Fill the cache of those regions
+      searched_region_ids = list(map(objfile_to_id, searched_regions))
+      memory_errors = self.find_pointers(searched_region_ids)
+
+      # Now, go through the caches
+      total_pointers = 0
+      PtrFind.print_msg("Generating results")
+      for i in range(0, len(searched_region_ids)):
+        id = searched_region_ids[i]
+        objfile = self.proc_mapping[id]
+        # Check the cache of each segment
+        for segment in objfile.segments:
+          # Check the cache of the destinations we are looking for
+          for destination in destination_regions:
+            # A counter to determine how many more pointers will be printed
+            ptrs_printed = 0
+            ptrs_omitted = 0
+            destination_id = destination.id
+            for(address, value, symbol) in segment.cache[destination_id]:
+              # 1. The address must be in our source range
+              # 2. The value must be in our destination range
+              if address >= searched_regions[i].start and address < searched_regions[i].end and \
+                 value >= destination.start and value < destination.end:
+                if ptrs_printed == 0:
+                  PtrFind.print_msg(f"Pointer(s) found from {PtrFind.COLOR_BOLD}{searched_regions[i].name}{PtrFind.COLOR_RESET} to {PtrFind.COLOR_BOLD}{destination.name}{PtrFind.COLOR_RESET}:")
+                if ptrs_printed < 5 or args.all:
+                  print(f"\t{PtrFind.COLOR_BOLD}{hex(address)}{PtrFind.COLOR_RESET} {f'({PtrFind.COLOR_WARNING}{symbol}{PtrFind.COLOR_RESET})' if symbol is not None else ''} → {hex(value)}")
+                  ptrs_printed += 1
+                else:
+                  ptrs_omitted += 1
+            if ptrs_omitted > 0:
+              print(f"\t({ptrs_omitted} pointer{'s' if ptrs_omitted > 1 else ''} omitted, use -a to show all)")
+            total_pointers += ptrs_printed + ptrs_omitted
+      
+      if total_pointers == 0:
+        PtrFind.print_error(f"Search done, no pointers were found")
+      else:
+        PtrFind.print_msg(f"Search done, {total_pointers} pointer{'' if total_pointers == 1 else 's'} found")
+      
+      if memory_errors > 0:
+        PtrFind.print_error(f"{memory_errors} {'address' if memory_errors == 1 else 'addresses'} could not be accessed due to a memory error.")
+
+    # Clear the cache for writeable pages
+    if not args.cache_all:
+      for objfile in self.proc_mapping:
+        for segment in objfile.segments:
+          if segment.permissions.write:
+            segment.cache = None
 
 
-  def pretty_print_addr(addr, addr_region):
-    '''Returns the name of the region. If the address in that region has a debug symbol, attach the name to it'''
-    symbol = gdb.execute(f"info symbol {hex(addr)}", to_string=True)
-    result = PtrFind.COLOR_BOLD + hex(addr) + PtrFind.COLOR_RESET + f" ({PtrFind.COLOR_BOLD + addr_region.name + PtrFind.COLOR_RESET}"
+  def print_leak_chains(leak_chains):
+    if leak_chains == []:
+      PtrFind.print_error(f"Search done, no pointers were found")
+    else:
+      for chain in leak_chains:
+          break
+
+
+
+
+  # return a list of list chains per region
+  # a chain is a list of step from region to another region
+  # represented by a list of pointers
+  # a pointer is represented by a tuple of region,
+  
+  def find_pointer_chains_rec(self, search_region_index, destination_range,visited):
+    
+    search_region = self.proc_mapping[search_region_index]
+    new_visited = visited.append(search_region)
+    chains = []
+
+    #update cache for current search region
+    self.find_pointers(search_region_index)
+
+    # for every possible target region check if we can get there
+    for target_region_index in range(0,len(search_region.cache)):
+      
+        # we can ignore the possible target if
+        #  1. we point back to where we are right now
+        #  2. we've been there already (loop)
+        #  3. we can't get there 
+      
+      target_region = self.proc_mappings[target_region_index]
+      
+      irrelevant_region = target_region_index == search_region_index \
+        or target_region_index in visited 
+      
+      new_chains = []
+      
+      if target_region_index in destination_range:
+        new_chains = [[]]
+      else:
+        for target_segment in target_region.segments:
+
+          irrelevant_segment = target_segment.cache[target_region_index] == []
+          if not irrelevant_segment:
+              # we've made it to a new region lets see where we can get from there
+            new_chains += self.find_pointer_chains_rec([target_region_index],destination_range,new_visited)
+      
+      # for all chains prepend the pointers that lead from the current region to the target region
+      map(lambda chain: search_region.cache[target_region_index] + chain , new_chains)
+        
+      chains.append(new_chains)
+        
+    return chains
+
+
+
+
+  def find_pointer_chains(self, search_range, destination_range):
+    chains = []
+    for region in search_range:
+      chains += self.find_pointer_chains_rec(region,destination_range,[])
+
+
+  def get_symbol(address):
+    symbol = gdb.execute(f"info symbol {hex(address)}", to_string=True)
     if not symbol.startswith("No symbol"):
       # We have a symbol
       symbol = symbol.split(" ", 3) 
-      result += f", {PtrFind.COLOR_WARNING + symbol[0] + PtrFind.COLOR_RESET}{('+' + hex(int(symbol[2]))) if symbol[1] == '+' else ''}"
-    result += ")"
-    return result
+      if symbol[1] == '+': # with offset
+        return f"{symbol[0]}+{hex(int(symbol[2]))}"
+      else:
+        return symbol[0]
+    else:
+      return None
 
-
+  '''
+  Fun Fact: Dumping the entire memory and then walking through it is slower by a factor of 6-8 on my laptop
+  '''
+  def find_pointers(self, ids_to_scan):
+    memory_errors = 0
+    for id in ids_to_scan:
+      objfile = self.proc_mapping[id]
+      for segment in objfile.segments:
+        if segment.cache is not None:
+          continue
+        segment.cache = [[]] * len(self.proc_mapping)
+        
+        for address in range(segment.start, segment.end, self.pointer_size):
+          try:
+            val = self.deref(address)
+          except gdb.MemoryError:
+            memory_errors += 1
+            continue
+          region_index = PtrFind.get_region(self.proc_mapping, val)
+          if region_index is not None:
+            # We found a pointer! cache it
+            segment.cache[region_index].append((address, val, PtrFind.get_symbol(address)))
+    return memory_errors
+        
+  
+  '''
   def find_pointers(search_range, proc_mapping):
-    '''Iterates over the serach range to find pointers to specific regions specified in the proc_mapping array'''
+    #Iterates over the serach range to find pointers to specific regions specified in the proc_mapping array
     for region in search_range:
       for addr in range(region.start, region.end, 8):
           try:
@@ -109,8 +275,9 @@ class PtrFind (gdb.Command):
           
           val_region = PtrFind.get_region(proc_mapping, val)
           if val_region is not None:
+            val_region = proc_mapping[val_region]
             PtrFind.print_msg(f"Pointer to {PtrFind.COLOR_BOLD + val_region.name + PtrFind.COLOR_RESET} found at {PtrFind.pretty_print_addr(addr, region)}")
-
+  '''
 
   def get_region(proc_mapping, addr, binary_search=True):
     '''Returns the region that this address belongs to. Returns None if it does not belong to any
@@ -137,49 +304,35 @@ class PtrFind (gdb.Command):
     
       # Only two items left, does the second item match?
       if start_index != end_index and addr >= proc_mapping[end_index].start and addr < proc_mapping[end_index].end:
-        return proc_mapping[end_index]
+        return end_index
 
       # Only one item left, so it must match
       if addr >= proc_mapping[start_index].start and addr < proc_mapping[start_index].end:
-        return proc_mapping[start_index]
+        return start_index
       else:
         return None
     else:  
       # Just iterate over the proc_mapping
       if addr >= proc_mapping[0].start and addr < proc_mapping[len(proc_mapping)-1].end:
-        for m in proc_mapping:
+        for i in range(0, len(proc_mapping)):
+          m = proc_mapping[i]
           if addr < m.end and addr >= m.start:
-                return m
+                return i
       return None
 
 
-  def deref(addr):
+  def deref(self, addr):
     '''Returns the value at the provided address, or throws a gdb.MemoryError if the address is invalid'''
-    if type(addr) is not gdb.Value:
-      addr = gdb.Value(addr)
-    # I don't know why - but the gdb.MemoryError is only thrown when the resulting value is actually used
-    # So, we add 0 to it. This causes the gdb.MemoryError to be thrown in here
-    return addr.cast(addr.type.pointer()).referenced_value().const_value() + 0
+    return int.from_bytes(PtrFind.memory_dump(addr, self.pointer_size), "little" if self.little_endian else "big")
   
   def read_integer(self, addr, size=0):
     '''Returns an unsigned integer stored at addr'''
     if size == 0: # arch default size
       size = self.pointer_size
-    mem = self.memory_dump(addr, size)
 
-    unpack = None
-    if size == 8:
-      unpack = u64
-    elif size == 4:
-      unpack = u32
-    elif size == 2:
-      unpack = u16
-    else:
-      raise ValueError("Invalid size")
-    
-    return unpack(mem)
+    return int.from_bytes(PtrFind.memory_dump(addr, size), "little" if self.little_endian else "big")
   
-  def memory_dump(self, addr, length):
+  def memory_dump(addr, length):
     return gdb.selected_inferior().read_memory(addr, length).tobytes()
 
   def parse_addr_region(self, destination):     
@@ -203,7 +356,7 @@ class PtrFind (gdb.Command):
       
       fs_base = frame.read_register("fs_base").const_value()
       try:
-        val = PtrFind.deref(fs_base)
+        val = self.deref(fs_base)
       except gdb.MemoryError:
         PtrFind.print_error("Failed to find TLS. Reason: $fs_base points to an invalid address. Please use manual address ranges")
         raise SyntaxError
@@ -211,7 +364,8 @@ class PtrFind (gdb.Command):
       if val != fs_base:
         PtrFind.print_warning("TLS parsing might have failed, proceed with caution. Reason: Start of TLS does not contain a self-reference")
       
-      tls = self.get_region(fs_base)
+      tls = PtrFind.get_region(self.proc_mapping, fs_base)
+      tls = self.proc_mapping[tls]
       tls.name = "[tls]"
       return [tls]
     elif destination.count('-') == 1: # start-end
@@ -244,7 +398,7 @@ class PtrFind (gdb.Command):
       (destination_start >= region.start and destination_end <= region.end)
 
         
-    destination_mapping = list(filter(in_range, copy.deepcopy(proc_mapping)))
+    destination_mapping = list(filter(in_range, copy.deepcopy(self.proc_mapping)))
 
     if(len(destination_mapping) == 0):
       PtrFind.print_error("Provided address range is unmapped")
@@ -254,8 +408,8 @@ class PtrFind (gdb.Command):
     for objfile in destination_mapping:
       objfile.name = "user-defined region in " + objfile.name
       objfile.segments = list(filter(in_range, objfile.segments))
-      objfile.segments[0].start = destination_start
-      objfile.segments[len(objfile.segments)-1] = destination_end
+      #objfile.segments[0].start = destination_start
+      #objfile.segments[len(objfile.segments)-1] = destination_end
     
     destination_mapping[0].start = destination_start
     destination_mapping[len(destination_mapping )-1].end = destination_end
@@ -287,7 +441,8 @@ class PtrFind (gdb.Command):
         end = int(line_entries[1],16),
         #size = int(line_entries[2],16),
         offset = int(line_entries[3],16),
-        perissions = PtrFind.parse_page_permissions(line_entries[4])
+        permissions = PtrFind.parse_page_permissions(line_entries[4]),
+        cache = None
       )
 
       # new objfile
@@ -303,7 +458,8 @@ class PtrFind (gdb.Command):
           name=new_name,
           segments=[],
           start = segment.start,
-          end = segment.end
+          end = segment.end,
+          id = len(objfiles)
         )
       
       if current_objfile.name == "":

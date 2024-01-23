@@ -92,34 +92,43 @@ class PtrFind (gdb.Command):
     # Step 4: parse mode
     if args.chain:
        print("Leak-chains active")
-       memory_errors = self.find_pointers(self.proc_mapping)
+       print(self.find_pointer_chains(list(map(objfile_to_id, start)), list(map(objfile_to_id, destination))))
     else:
       searched_regions = None
       destination_regions = None
-      if args.leaks:
+      if args.leaks: # from .. to anywhere
         searched_regions = destination
         destination_regions = self.proc_mapping
-        #PtrFind.find_pointers(destination, self.proc_mapping)
       elif start is None: # from anywhere to ...
         searched_regions = self.proc_mapping
         destination_regions = destination
-        #PtrFind.find_pointers(self.proc_mapping, destination)
       else: # from ... to ...
         searched_regions = start
         destination_regions = destination
-        #PtrFind.find_pointers(start, destination)
 
       PtrFind.print_msg("Searching for pointers, this may take a few minutes")
       
       # Fill the cache of those regions
-      searched_region_ids = list(map(objfile_to_id, searched_regions))
-      memory_errors = self.find_pointers(searched_region_ids)
+      memory_errors = self.find_pointers(list(map(objfile_to_id, searched_regions)))
 
       # Now, go through the caches
-      total_pointers = 0
-      PtrFind.print_msg("Generating results")
-      for i in range(0, len(searched_region_ids)):
-        id = searched_region_ids[i]
+      self.print_pointers(searched_regions, destination_regions, args.all)
+      
+      if memory_errors > 0:
+        PtrFind.print_error(f"{memory_errors} {'address' if memory_errors == 1 else 'addresses'} could not be accessed due to a memory error.")
+
+    # Clear the cache for writeable pages
+    if not args.cache_all:
+      for objfile in self.proc_mapping:
+        for segment in objfile.segments:
+          if segment.permissions.write:
+            segment.cache = None
+
+  def print_pointers(self, searched_regions, destination_regions, print_all):
+    '''Print the result of a pointer search'''
+    total_pointers = 0
+    for i in range(0, len(searched_regions)):
+        id = searched_regions[i].id
         objfile = self.proc_mapping[id]
         # Check the cache of each segment
         for segment in objfile.segments:
@@ -136,34 +145,24 @@ class PtrFind (gdb.Command):
                  value >= destination.start and value < destination.end:
                 if ptrs_printed == 0:
                   PtrFind.print_msg(f"Pointer(s) found from {PtrFind.COLOR_BOLD}{searched_regions[i].name}{PtrFind.COLOR_RESET} to {PtrFind.COLOR_BOLD}{destination.name}{PtrFind.COLOR_RESET}:")
-                if ptrs_printed < 5 or args.all:
-                  print(f"\t{PtrFind.COLOR_BOLD}{hex(address)}{PtrFind.COLOR_RESET} {f'({PtrFind.COLOR_WARNING}{symbol}{PtrFind.COLOR_RESET})' if symbol is not None else ''} → {hex(value)}")
+                if ptrs_printed < 5 or print_all:
+                  print(f"\t{PtrFind.COLOR_BOLD}{hex(address)}{PtrFind.COLOR_RESET}{f' ({PtrFind.COLOR_WARNING}{symbol}{PtrFind.COLOR_RESET})' if symbol is not None else ''} → {hex(value)}")
                   ptrs_printed += 1
                 else:
                   ptrs_omitted += 1
             if ptrs_omitted > 0:
               print(f"\t({ptrs_omitted} pointer{'s' if ptrs_omitted > 1 else ''} omitted, use -a to show all)")
             total_pointers += ptrs_printed + ptrs_omitted
-      
-      if total_pointers == 0:
-        PtrFind.print_error(f"Search done, no pointers were found")
-      else:
-        PtrFind.print_msg(f"Search done, {total_pointers} pointer{'' if total_pointers == 1 else 's'} found")
-      
-      if memory_errors > 0:
-        PtrFind.print_error(f"{memory_errors} {'address' if memory_errors == 1 else 'addresses'} could not be accessed due to a memory error.")
-
-    # Clear the cache for writeable pages
-    if not args.cache_all:
-      for objfile in self.proc_mapping:
-        for segment in objfile.segments:
-          if segment.permissions.write:
-            segment.cache = None
+               
+    if total_pointers == 0:
+      PtrFind.print_error(f"Search done, no pointers were found")
+    else:
+      PtrFind.print_msg(f"Search done, {total_pointers} pointer{'' if total_pointers == 1 else 's'} found")
 
 
   def print_leak_chains(leak_chains):
     if leak_chains == []:
-      PtrFind.print_error(f"Search done, no pointers were found")
+      PtrFind.print_error(f"Search done, no chains were found")
     else:
       for chain in leak_chains:
           break
@@ -176,54 +175,52 @@ class PtrFind (gdb.Command):
   # represented by a list of pointers
   # a pointer is represented by a tuple of region,
   
-  def find_pointer_chains_rec(self, search_region_index, destination_range,visited):
-    
+  def find_pointer_chains_rec(self, search_region_index, destination_range, visited):
     search_region = self.proc_mapping[search_region_index]
-    new_visited = visited.append(search_region)
+    new_visited = visited + [search_region_index]
     chains = []
 
     #update cache for current search region
-    self.find_pointers(search_region_index)
+    self.find_pointers([search_region_index])
 
     # for every possible target region check if we can get there
-    for target_region_index in range(0,len(search_region.cache)):
-      
-        # we can ignore the possible target if
-        #  1. we point back to where we are right now
-        #  2. we've been there already (loop)
+    for target_region_index in range(0,len(self.proc_mapping)):
         #  3. we can't get there 
       
-      target_region = self.proc_mappings[target_region_index]
       
+      # we can ignore the possible target if
+      #  1. we point back to where we are right now
+      #  2. we've been there already (loop)
       irrelevant_region = target_region_index == search_region_index \
         or target_region_index in visited 
       
-      new_chains = []
-      
-      if target_region_index in destination_range:
-        new_chains = [[]]
-      else:
-        for target_segment in target_region.segments:
+      if not irrelevant_region:
 
-          irrelevant_segment = target_segment.cache[target_region_index] == []
-          if not irrelevant_segment:
-              # we've made it to a new region lets see where we can get from there
-            new_chains += self.find_pointer_chains_rec([target_region_index],destination_range,new_visited)
-      
-      # for all chains prepend the pointers that lead from the current region to the target region
-      map(lambda chain: search_region.cache[target_region_index] + chain , new_chains)
-        
-      chains.append(new_chains)
+        for search_segment in search_region.segments:
+          pointers = search_segment.cache[target_region_index]
+
+          if target_region_index in destination_range:
+            # we've made it to out target so we can get there in 0 steps
+            new_chains = [pointers]
+          elif not pointers == []:
+            # we've made it to a new region lets see where we can get from there
+            new_chains = list(map(
+              lambda chain: [pointers] + chain,self.find_pointer_chains_rec(target_region_index,
+              destination_range,new_visited)))
+          else:
+            new_chains = []
+
+          chains += new_chains
+
         
     return chains
-
-
 
 
   def find_pointer_chains(self, search_range, destination_range):
     chains = []
     for region in search_range:
-      chains += self.find_pointer_chains_rec(region,destination_range,[])
+      chains += self.find_pointer_chains_rec(region, destination_range, [])
+    return chains
 
 
   def get_symbol(address):

@@ -52,7 +52,7 @@ class PtrFind (gdb.Command):
 
     try:
       if self.proc_mapping is None:
-        proc_mapping = PtrFind.create_proc_map()
+        self.proc_mapping = PtrFind.create_proc_map()
     except gdb.error as e:
       PtrFind.print_error("Couldn't get process map. Is no program running?")
       return
@@ -79,9 +79,9 @@ class PtrFind (gdb.Command):
     if args.chain:
        print("Leak-chains active")
     elif args.leaks:
-      PtrFind.find_pointers(destination, proc_mapping)
+      PtrFind.find_pointers(destination, self.proc_mapping)
     elif start is None: # from anywhere to ...
-      PtrFind.find_pointers(proc_mapping, destination)
+      PtrFind.find_pointers(self.proc_mapping, destination)
     else: # from ... to ...
       PtrFind.find_pointers(start, destination)
 
@@ -112,42 +112,42 @@ class PtrFind (gdb.Command):
             PtrFind.print_msg(f"Pointer to {PtrFind.COLOR_BOLD + val_region.name + PtrFind.COLOR_RESET} found at {PtrFind.pretty_print_addr(addr, region)}")
 
 
-  def get_region(self, addr, binary_search=True):
+  def get_region(proc_mapping, addr, binary_search=True):
     '''Returns the region that this address belongs to. Returns None if it does not belong to any
       2 Versions that are similar in speed 
       TODO: more benchmarking
     '''
     if binary_search:
       start_index = 0
-      end_index = len(self.proc_mapping) - 1
+      end_index = len(proc_mapping) - 1
       while True:
         if start_index == end_index or start_index + 1 == end_index:
           break
         # addr cannot be in that range
-        if addr < self.proc_mapping[start_index].start or addr >= self.proc_mapping[end_index].end:
+        if addr < proc_mapping[start_index].start or addr >= proc_mapping[end_index].end:
           return None
         else:
           # Take the middle. If it is an even number, take the righter objfile
           middle_index = start_index + end_index >> 1
-          if(addr >= self.proc_mapping[middle_index].start):
+          if(addr >= proc_mapping[middle_index].start):
             start_index = middle_index
           else:
             end_index = middle_index
           continue
     
       # Only two items left, does the second item match?
-      if start_index != end_index and addr >= self.proc_mapping[end_index].start and addr < self.proc_mapping[end_index].end:
-        return self.proc_mapping[end_index]
+      if start_index != end_index and addr >= proc_mapping[end_index].start and addr < proc_mapping[end_index].end:
+        return proc_mapping[end_index]
 
       # Only one item left, so it must match
-      if addr >= self.proc_mapping[start_index].start and addr < self.proc_mapping[start_index].end:
-        return self.proc_mapping[start_index]
+      if addr >= proc_mapping[start_index].start and addr < proc_mapping[start_index].end:
+        return proc_mapping[start_index]
       else:
         return None
     else:  
       # Just iterate over the proc_mapping
-      if addr >= self.proc_mapping[0].start and addr < self.proc_mapping[len(self.proc_mapping)-1].end:
-        for m in self.proc_mapping:
+      if addr >= proc_mapping[0].start and addr < proc_mapping[len(proc_mapping)-1].end:
+        for m in proc_mapping:
           if addr < m.end and addr >= m.start:
                 return m
       return None
@@ -211,7 +211,7 @@ class PtrFind (gdb.Command):
       if val != fs_base:
         PtrFind.print_warning("TLS parsing might have failed, proceed with caution. Reason: Start of TLS does not contain a self-reference")
       
-      tls = PtrFind.get_region(self.proc_mapping, fs_base)
+      tls = self.get_region(fs_base)
       tls.name = "[tls]"
       return [tls]
     elif destination.count('-') == 1: # start-end

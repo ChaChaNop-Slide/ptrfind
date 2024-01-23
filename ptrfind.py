@@ -147,7 +147,7 @@ class PtrFind (gdb.Command):
       return None
 
 
-
+  @DeprecationWarning
   def deref(addr):
     '''Returns the value at the provided address, or throws a gdb.MemoryError if the address is invalid'''
     if type(addr) is not gdb.Value:
@@ -155,6 +155,28 @@ class PtrFind (gdb.Command):
     # I don't know why - but the gdb.MemoryError is only thrown when the resulting value is actually used
     # So, we add 0 to it. This causes the gdb.MemoryError to be thrown in here
     return addr.cast(addr.type.pointer()).referenced_value().const_value() + 0
+  
+  def read_integer(addr, size=0):
+    '''Returns an unsigned integer stored at addr'''
+    if size == 0: # arch default size
+      size = gdb.lookup_type('void').pointer().sizeof
+    mem = PtrFind.memory_dump(addr, size)
+
+    unpack = None
+    if size == 8:
+      unpack = u64
+    elif size == 4:
+      unpack = u32
+    elif size == 2:
+      unpack = u16
+    else:
+      raise ValueError("Invalid size")
+    
+    
+    return unpack(mem)
+  
+  def memory_dump(addr, length):
+    return gdb.selected_inferior().read_memory(addr, length).tobytes()
 
   def parse_addr_region(proc_mapping, destination):     
     '''Receives a user-provided region string and returns a subset of the proc_mapping that represents the search region'''

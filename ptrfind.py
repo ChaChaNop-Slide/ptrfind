@@ -58,6 +58,7 @@ class PtrFind (gdb.Command):
     if args.clear_cache:
       self.proc_mapping = None
       PtrFind.print_msg("Cache has been cleared")
+    self.verify_caches()
 
     # Step 1: If the cache is empty, create a proc mapping
     try:
@@ -109,7 +110,8 @@ class PtrFind (gdb.Command):
     # Step 4: parse mode
     if args.chain:
        print("Leak-chains active")
-       print(self.find_pointer_chains(list(map(PtrFind.objfile_to_id, start)), list(map(PtrFind.objfile_to_id, destination))))
+       leak_chains = self.find_pointer_chains(list(map(PtrFind.objfile_to_id, start)), list(map(PtrFind.objfile_to_id, destination)))
+       self.print_leak_chains(leak_chains, args.all)
     else:
       searched_regions = None
       destination_regions = None
@@ -124,6 +126,7 @@ class PtrFind (gdb.Command):
         destination_regions = destination
       else:
         PtrFind.print_error("Missing start and/or destination range")
+        return
 
       PtrFind.print_msg("Searching for pointers, this may take a few minutes")
       
@@ -144,7 +147,7 @@ class PtrFind (gdb.Command):
             segment.cache = None
 
 
-  def print_pointers(self, searched_regions, destination_regions, print_all):
+  def print_pointers(self, searched_regions, destination_regions, print_all, verbose_print=True):
     '''Print the result of a pointer search'''
     total_pointers = 0
     for i in range(0, len(searched_regions)):
@@ -163,30 +166,40 @@ class PtrFind (gdb.Command):
               # 2. The value must be in our destination range
               if address >= searched_regions[i].start and address < searched_regions[i].end and \
                  value >= destination.start and value < destination.end:
-                if ptrs_printed == 0:
+                if ptrs_printed == 0 and verbose_print:
                   PtrFind.print_msg(f"Pointer(s) found from {PtrFind.COLOR_BOLD}{searched_regions[i].name}{PtrFind.COLOR_RESET} to {PtrFind.COLOR_BOLD}{destination.name}{PtrFind.COLOR_RESET}:")
                 if ptrs_printed < 5 or print_all:
                   print(f"\t{PtrFind.COLOR_BOLD}{hex(address)}{PtrFind.COLOR_RESET}{symbol_src} → {hex(value)}{symbol_dest}")
                   ptrs_printed += 1
                 else:
                   ptrs_omitted += 1
+              else:
+                print(f"\t\t[!] Pointer was omitted: {hex(address)} -> {hex(value)}")
             if ptrs_omitted > 0:
               print(f"\t({ptrs_omitted} pointer{'s' if ptrs_omitted > 1 else ''} omitted, use -a to show all)")
             total_pointers += ptrs_printed + ptrs_omitted
-               
-    if total_pointers == 0:
-      PtrFind.print_error(f"Search done, no pointers were found")
-    else:
-      PtrFind.print_msg(f"Search done, {total_pointers} pointer{'' if total_pointers == 1 else 's'} found")
+
+    if verbose_print:   
+      if total_pointers == 0:
+        PtrFind.print_error(f"Search done, no pointers were found")
+      else:
+        PtrFind.print_msg(f"Search done, {total_pointers} pointer{'' if total_pointers == 1 else 's'} found")
       
 
-  def print_leak_chains(leak_chains):
+  def print_leak_chains(self, leak_chains, print_all):
+    self.verify_caches()
     if leak_chains == []:
-      PtrFind.print_error(f"Search done, no chains were found")
+      PtrFind.print_error(f"Search done, no paths were found")
     else:
       for chain in leak_chains:
-          break
-
+        PtrFind.print_msg(f"Leak-chain found ({len(chain) -1} leaks):")
+        # Here, we have a list of ids where we step through
+        for i in range(0, len(chain)):
+          id = chain[i]
+          print(f"  → {self.proc_mapping[id].name}")
+          if i != len(chain) - 1:
+            self.print_pointers([self.proc_mapping[id]], [(self.proc_mapping[chain[i + 1]])], print_all, verbose_print=False)
+      PtrFind.print_msg(f"Search done, {len(leak_chains)} unique chain{'s were' if len(leak_chains) > 1 else ' was'} found")
 
   # return a list of chains
   # a chain is a list of step from region to another region
@@ -194,47 +207,35 @@ class PtrFind (gdb.Command):
   # a pointer is represented by a tuple of region,
   
   def find_pointer_chains_rec(self, search_region_index: int, destination_range: list[int], visited : list[int]) -> list[list[int]]:
+    print(f"region: {search_region_index}")
+    self.verify_caches()
     search_region = self.proc_mapping[search_region_index]
-    
     new_visited = visited + [search_region_index]
     chains = []
 
-    #update cache for current search region
+    # create cache for current search region, if not done already
     self.find_pointers([search_region_index])
 
     # for every possible target region
     for target_region_index in range(0,len(self.proc_mapping)):
-        #  3. we can't get there 
-      
-      
-      # we can ignore the possible target if
-      #  1. we point back to where we are right now
-      #  2. we've been there already (loop)
-      irrelevant_region = target_region_index == search_region_index \
-        or target_region_index in new_visited 
-      
-      if not irrelevant_region:
-
+      # is relevant (no loop)
+      if not (target_region_index == search_region_index or target_region_index in new_visited ):
+        path_exists = False
         for search_segment in search_region.segments:
           # check if we can get there
           pointers = search_segment.cache[target_region_index]
 
-          if pointers == []:
-            # we can't get there
-            new_chains = []
-
-          elif target_region_index in destination_range:
-            # we've made it to our target so we can get there in 0 steps
-            new_chains = [[pointers]]
-          else:
-            # we've made it to a new region lets see where we can get from there
-            new_chains = list(map(
-              lambda chain: [pointers] + chain,
-              self.find_pointer_chains_rec(target_region_index,destination_range,new_visited)))
-
-          chains += new_chains
-
-        
+          if pointers != []:
+            path_exists = True
+            
+        if not path_exists:
+          continue
+        elif target_region_index in destination_range:
+          chains += [[search_region_index,target_region_index]]
+        else:
+          chains +=  list(map(
+            lambda chain: [search_region_index] + chain,
+            self.find_pointer_chains_rec(target_region_index,destination_range,new_visited)))
     return chains
 
 
@@ -242,13 +243,9 @@ class PtrFind (gdb.Command):
     chains = []
     for region_id in search_range:
       chains += self.find_pointer_chains_rec(region_id, destination_range, [])
-
-    print(f"{len(chains)} chains found")
-    amount_of_pointers = sum(map(len,chains))
-    sample = list(map(lambda chain: list(map(len,chain)) ,chains[0:3]))
-    print(f"{amount_of_pointers} total paths found")
-    return sample
     return chains
+
+
 
   def get_symbol(address):
     symbol = gdb.execute(f"info symbol {hex(address)}", to_string=True)
@@ -282,8 +279,21 @@ class PtrFind (gdb.Command):
           if region_index is not None:
             # We found a pointer! cache it
             segment.cache[region_index].append((address, val, PtrFind.get_symbol(address), PtrFind.get_symbol(val)))
+            self.verify_caches()
     return memory_errors
-        
+
+  def verify_caches(self):
+    if self.proc_mapping is None:
+      return
+    for objfile in self.proc_mapping:
+      for segment in objfile.segments:
+        if segment.cache is None:
+          continue
+        for i in range(0, len(segment.cache)):
+          for (addr, val, _, _) in segment.cache[i]:
+            if addr < segment.start or addr >= segment.end or val < self.proc_mapping[i].start or val >= self.proc_mapping[i].end:
+              raise SyntaxError("Broken cache found!")  
+    PtrFind.print_msg("Cache verified!")  
   
   '''
   def find_pointers(search_range, proc_mapping):
@@ -339,7 +349,7 @@ class PtrFind (gdb.Command):
         for i in range(0, len(proc_mapping)):
           m = proc_mapping[i]
           if addr < m.end and addr >= m.start:
-                return i
+            return i
       return None
 
 

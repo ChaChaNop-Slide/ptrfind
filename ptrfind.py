@@ -62,7 +62,7 @@ class PtrFind (gdb.Command):
     
     args = None
     try:
-      parser.parse_args(gdb.string_to_argv(arg))
+      args = parser.parse_args(gdb.string_to_argv(arg))
     except Exception:
       PtrFind.print_error(f"Option parsing failed")
       return
@@ -82,7 +82,7 @@ class PtrFind (gdb.Command):
       print(f"  {PtrFind.COLOR_BOLD}-f / --from <start region>{PtrFind.COLOR_RESET}\n    Where to start looking for pointers")
       print(f"  {PtrFind.COLOR_BOLD}--chain <#chains printed>{PtrFind.COLOR_RESET}\n    Print leak-chains, with the optional argument specifying how many chains are printed (default: 5)")
       print(f"\n{PtrFind.COLOR_BOLD}Advanced options:{PtrFind.COLOR_RESET}")
-      print(f"  {PtrFind.COLOR_BOLD}-a / --all{PtrFind.COLOR_RESET}\n    Print all pointers for a region instead of just the fist five")
+      print(f"  {PtrFind.COLOR_BOLD}-a / --all{PtrFind.COLOR_RESET}\n    Print all pointers for a region instead of just the first five")
       print(f"  {PtrFind.COLOR_BOLD}-b / --bad-bytes{PtrFind.COLOR_RESET}\n    A comma-separated list of hex-values that are not allowed to be in the pointer (e.g. \"00,0a\")")
       print(f"  {PtrFind.COLOR_BOLD}-c / --cache-all{PtrFind.COLOR_RESET}\n    Also cache the pointers found in writeable sections (faster, but may lead to wrong/incomplete output down the line)")
       print(f"  {PtrFind.COLOR_BOLD}--clear-cache{PtrFind.COLOR_RESET}\n    Clear the entire cache and re-fetch the process map")

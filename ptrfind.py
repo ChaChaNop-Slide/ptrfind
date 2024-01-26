@@ -1,8 +1,9 @@
 try:
     import gdb 
-except ImportError:
-    PtrFind.print_error("[-] This command cannot run as standalone. See README for details.")
+except (ImportError, ModuleNotFoundError):
+    print("[-] This command cannot run as standalone. See README for details.")
     exit(1)
+
 
 import argparse
 from types import SimpleNamespace
@@ -19,7 +20,7 @@ class PtrFind (gdb.Command):
   little_endian = None
   pointer_size = None
   proc_mapping = None
-  
+  i_proc_m_output = None
 
   def __init__ (self):
     super (PtrFind, self).__init__ ("ptrfind", gdb.COMMAND_USER)
@@ -33,9 +34,7 @@ class PtrFind (gdb.Command):
   def print_warning(msg):
     print(PtrFind.COLOR_WARNING + PtrFind.COLOR_BOLD + "[!] " + PtrFind.COLOR_RESET + msg)
 
-  
   def objfile_to_id(objfile): return objfile.id
-
 
   def invoke (self, arg, from_tty):
     parser = argparse.ArgumentParser(
@@ -48,22 +47,25 @@ class PtrFind (gdb.Command):
     parser.add_argument('-f', '--from', dest="start_region", metavar="<Search region>", help="Where to look")
     parser.add_argument('-a', "--all", action='store_true', help="print all pointers instead of only the first matches")
     parser.add_argument('-c', "--cache-all", action='store_true', help="also cache the pointers found in writeable sections (faster, but may lead to wrong/incomplete output)")
-    #parser.add_argument('-b', "--bad-bytes", help="Comma separated list of Hex values that are not allowed to be in the pointer (e.g. \"00,0a\")")
+    parser.add_argument('-b', "--bad-bytes", help="Comma separated list of Hex values that are not allowed to be in the pointer (e.g. \"00,0a\")")
     parser.add_argument("--clear-cache", action='store_true', help="clears the cache")
     
     args = parser.parse_args(gdb.string_to_argv(arg))
     self.pointer_size = gdb.lookup_type('void').pointer().sizeof
     self.little_endian = "little endian" in gdb.execute("show endian", to_string=True)
+
+    if self.proc_mapping is not None and self.i_proc_m_output != gdb.execute("info proc mappings", to_string=True):
+      PtrFind.print_warning("the process map was updated (e.g. new permissions, new pages mapped). Cache has been cleared.")
+      self.proc_mapping = None
     
     if args.clear_cache:
       self.proc_mapping = None
       PtrFind.print_msg("Cache has been cleared")
-    self.verify_caches()
 
     # Step 1: If the cache is empty, create a proc mapping
     try:
       if self.proc_mapping is None:
-        self.proc_mapping = PtrFind.create_proc_map()
+        self.create_proc_map()
     except gdb.error as e:
       PtrFind.print_error("Couldn't get process map. Is no program running?")
       return
@@ -88,30 +90,43 @@ class PtrFind (gdb.Command):
         return
 
     
-    
-    '''
-    t1_start = time.perf_counter() 
-    self.find_pointers_efficient(start)
-    t1_stop = time.perf_counter()
-    print("Elapsed efficient time in seconds:",t1_stop-t1_start)
-    '''
-    
-    ''' moved
-    def objfile_to_id(objfile): return objfile.id
+    # Step 4: Parse bad bytes
+    if args.bad_bytes is not None:
+      args.bad_bytes = args.bad_bytes.split(",")
+      args.bad_bytes = list(map(lambda hexstr: int("0x"+hexstr, 16) & 0xFF, args.bad_bytes))
 
-    def id_to_index(id,mapping):
-      for objfile_index in range(0,len(mapping)):
-        if mapping[objfile_index].id == id:
-          return objfile_index
-          '''
-
+    def is_valid_pointer(addr, val, from_start, to_end):
+      # Is there a bad byte?
+      if args.bad_bytes is not None:
+        for byte in struct.pack("Q", val).rstrip(b"\x00"):
+          if byte in args.bad_bytes:
+            return False
+      # Is it contained in the start region?
+      if from_start:
+        contained = False  
+        for objfile in start:
+          if addr >= objfile.start and addr < objfile.end:
+            contained = True
+        
+        if not contained:
+          return False
+      # Is it contained in the end region?    
+      if to_end:
+        contained = False
+        for objfile in destination:
+          if val >= objfile.start and val < objfile.end:
+            contained = True
+        
+        if not contained:
+          return False
+      # Seems to be fine(TM)
+      return True
 
     memory_errors = 0
-    # Step 4: parse mode
+    # Step 5: parse mode
     if args.chain:
-       print("Leak-chains active")
-       leak_chains = self.find_pointer_chains(list(map(PtrFind.objfile_to_id, start)), list(map(PtrFind.objfile_to_id, destination)))
-       self.print_leak_chains(leak_chains, args.all)
+      leak_chains = self.find_pointer_chains(list(map(PtrFind.objfile_to_id, start)), list(map(PtrFind.objfile_to_id, destination)), is_valid_pointer)
+      self.print_leak_chains(leak_chains, args.all, args.bad_bytes)
     else:
       searched_regions = None
       destination_regions = None
@@ -134,7 +149,7 @@ class PtrFind (gdb.Command):
       memory_errors = self.find_pointers(list(map(PtrFind.objfile_to_id, searched_regions)))
 
       # Now, go through the caches
-      self.print_pointers(searched_regions, destination_regions, args.all)
+      self.print_pointers(searched_regions, destination_regions, args.all, args.bad_bytes)
       
       if memory_errors > 0:
         PtrFind.print_error(f"{memory_errors} {'address' if memory_errors == 1 else 'addresses'} could not be accessed due to a memory error.")
@@ -147,7 +162,7 @@ class PtrFind (gdb.Command):
             segment.cache = None
 
 
-  def print_pointers(self, searched_regions, destination_regions, print_all, verbose_print=True):
+  def print_pointers(self, searched_regions, destination_regions, print_all, bad_bytes, verbose_print=True):
     '''Print the result of a pointer search'''
     total_pointers = 0
     for i in range(0, len(searched_regions)):
@@ -162,8 +177,18 @@ class PtrFind (gdb.Command):
             ptrs_omitted = 0
             destination_id = destination.id
             for(address, value, symbol_src, symbol_dest) in segment.cache[destination_id]:
-              # 1. The address must be in our source range
-              # 2. The value must be in our destination range
+              # 1. The value mustn't contain any bad byte
+              bad_byte_found = False
+              if bad_bytes is not None:
+                for byte in struct.pack("Q", value).rstrip(b"\x00"):
+                  if byte in bad_bytes:
+                    bad_byte_found = True
+                    break
+              if bad_byte_found:
+                continue      
+              
+              # 2. The address must be in our source range
+              # 3. The value must be in our destination range
               if address >= searched_regions[i].start and address < searched_regions[i].end and \
                  value >= destination.start and value < destination.end:
                 if ptrs_printed == 0 and verbose_print:
@@ -186,63 +211,109 @@ class PtrFind (gdb.Command):
         PtrFind.print_msg(f"Search done, {total_pointers} pointer{'' if total_pointers == 1 else 's'} found")
       
 
-  def print_leak_chains(self, leak_chains, print_all):
-    self.verify_caches()
+  def print_leak_chains(self, leak_chains, print_all, bad_bytes):
+    print(f"Bad bytes is {bad_bytes}")
+    leak_chains.sort(key=lambda x: len(x))
     if leak_chains == []:
       PtrFind.print_error(f"Search done, no paths were found")
     else:
       for chain in leak_chains:
-        PtrFind.print_msg(f"Leak-chain found ({len(chain) -1} leaks):")
+        PtrFind.print_msg(f"Leak-chain found ({len(chain) -1} leak{'s' if len(chain) > 2 else ''}:")
         # Here, we have a list of ids where we step through
         for i in range(0, len(chain)):
           id = chain[i]
           print(f"  → {self.proc_mapping[id].name}")
           if i != len(chain) - 1:
-            self.print_pointers([self.proc_mapping[id]], [(self.proc_mapping[chain[i + 1]])], print_all, verbose_print=False)
+            self.print_pointers([self.proc_mapping[id]], [(self.proc_mapping[chain[i + 1]])], print_all, bad_bytes, verbose_print=False)
       PtrFind.print_msg(f"Search done, {len(leak_chains)} unique chain{'s were' if len(leak_chains) > 1 else ' was'} found")
 
-  # return a list of chains
-  # a chain is a list of step from region to another region
-  # represented by a list of pointers
-  # a pointer is represented by a tuple of region,
   
-  def find_pointer_chains_rec(self, search_region_index: int, destination_range: list[int], visited : list[int]) -> list[list[int]]:
-    print(f"region: {search_region_index}")
-    self.verify_caches()
+  def find_pointer_chains_rec(self, search_region_index, destination_range, visited, is_valid_pointer : list[int]) -> list[list[int]]:
     search_region = self.proc_mapping[search_region_index]
+
     new_visited = visited + [search_region_index]
     chains = []
 
     # create cache for current search region, if not done already
     self.find_pointers([search_region_index])
 
-    # for every possible target region
-    for target_region_index in range(0,len(self.proc_mapping)):
+    # for every possible next region
+    for next_region_index in range(0,len(self.proc_mapping)):
       # is relevant (no loop)
-      if not (target_region_index == search_region_index or target_region_index in new_visited ):
+      if not (next_region_index == search_region_index or next_region_index in new_visited ):
+        # check if we can get to the target region
         path_exists = False
+        points_to_end = (next_region_index in destination_range)
+        from_start = (visited == [])
         for search_segment in search_region.segments:
-          # check if we can get there
-          pointers = search_segment.cache[target_region_index]
+          pointers = search_segment.cache[next_region_index]
+          if pointers != [] and not path_exists:            
+            valid_found = False
+            for (addr, val, _, _) in pointers:
+              if is_valid_pointer(addr, val, from_start, points_to_end):
+                valid_found = True
+                break
 
-          if pointers != []:
-            path_exists = True
-            
+            path_exists = valid_found
+
         if not path_exists:
           continue
-        elif target_region_index in destination_range:
-          chains += [[search_region_index,target_region_index]]
+        elif points_to_end:
+          chains += [[search_region_index,next_region_index]]
+        else:
+          chains += list(map(
+            lambda chain: [search_region_index] + chain,
+            self.find_pointer_chains_rec(next_region_index,destination_range,new_visited, is_valid_pointer)))
+
+
+
+        '''   
+        if not path_exists:
+          continue
+        elif next_region_index in destination_range:
+          chains += [[search_region_index,next_region_index]]
         else:
           chains +=  list(map(
             lambda chain: [search_region_index] + chain,
-            self.find_pointer_chains_rec(target_region_index,destination_range,new_visited)))
+            self.find_pointer_chains_rec(next_region_index,destination_range,new_visited)))
+        
+        
+        
+
+        else:
+          # check if we got to the destination
+          reaches_destination = False
+        
+          for destination_region in destination_range:
+            
+            if destination_region.id == next_region_index:
+              for search_segment in search_region.segments:
+                pointers = search_segment.cache[next_region_index]
+                for (addr,val,_) in pointers:
+                  if is_valid_pointer(addr,val,False,True):
+                    reaches_destination = True
+                    
+       
+        for search_segment in search_region.segments:
+          #      pointers = search_segment.cache[next_region_index]
+
+
+
+          if reaches_destination:
+            chains += [[search_region_index,next_region_index]]
+
+          else:
+            chains +=  list(map(
+              lambda chain: [search_region_index] + chain,
+              self.find_pointer_chains_rec(self.proc_mapping[next_region_index],destination_range,new_visited)))
+     '''
     return chains
 
 
-  def find_pointer_chains(self, search_range: list[int], destination_range:list[int]) -> list[list[list[tuple[int,int,str]]]]:
+  def find_pointer_chains(self, search_range: list[int], destination_range:list[int], is_valid_pointer) -> list[list[int]]:
     chains = []
     for region_id in search_range:
-      chains += self.find_pointer_chains_rec(region_id, destination_range, [])
+      chains += self.find_pointer_chains_rec(region_id, destination_range, [], is_valid_pointer)
     return chains
 
 
@@ -267,7 +338,12 @@ class PtrFind (gdb.Command):
       for segment in objfile.segments:
         if segment.cache is not None:
           continue
-        segment.cache = [[]] * len(self.proc_mapping)
+
+        segment.cache = []
+        for i in range(0, len(self.proc_mapping)):
+          segment.cache.append([])
+          
+        #segment.cache = [[]] * len(self.proc_mapping)
         
         for address in range(segment.start, segment.end, self.pointer_size):
           try:
@@ -279,7 +355,6 @@ class PtrFind (gdb.Command):
           if region_index is not None:
             # We found a pointer! cache it
             segment.cache[region_index].append((address, val, PtrFind.get_symbol(address), PtrFind.get_symbol(val)))
-            self.verify_caches()
     return memory_errors
 
   def verify_caches(self):
@@ -458,9 +533,10 @@ class PtrFind (gdb.Command):
   
   gdb builtin get objfiles/ get spaces doesn't return what we expect
   '''
-  def create_proc_map():
+  def create_proc_map(self):
     '''Manually parse the output of `i proc m` into something that we can understand'''
-    mappings_output = gdb.execute("info proc mappings", to_string=True).splitlines()[4:]
+    self.i_proc_m_output = gdb.execute("info proc mappings", to_string=True)
+    mappings_output = self.i_proc_m_output.splitlines()[4:]
     
     objfiles = []
     current_objfile = None
@@ -498,7 +574,7 @@ class PtrFind (gdb.Command):
         current_objfile.name = f"[{hex(current_objfile.start)}-{hex(current_objfile.end)}]"
       current_objfile.end = segment.end
       current_objfile.segments.append(segment)
-    return objfiles
+    self.proc_mapping = objfiles
     
   def parse_page_permissions(prems_str):
     return SimpleNamespace(

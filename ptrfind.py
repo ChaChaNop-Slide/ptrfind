@@ -60,7 +60,13 @@ class PtrFind (gdb.Command):
     parser.add_argument('-h', "--help", action="store_true")
     parser.add_argument("--clear-cache", action='store_true', help="clears the cache")
     
-    args = parser.parse_args(gdb.string_to_argv(arg))
+    args = None
+    try:
+      parser.parse_args(gdb.string_to_argv(arg))
+    except Exception:
+      PtrFind.print_error(f"Option parsing failed")
+      return
+    
     self.pointer_size = gdb.lookup_type('void').pointer().sizeof
     self.little_endian = "little endian" in gdb.execute("show endian", to_string=True)
 

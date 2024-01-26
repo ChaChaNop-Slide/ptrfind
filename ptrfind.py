@@ -170,7 +170,7 @@ class PtrFind (gdb.Command):
       searched_regions = None
       destination_regions = None
       if start is not None and destination is None: # from .. to anywhere
-        searched_regions = destination
+        searched_regions = start
         destination_regions = self.proc_mapping
       elif start is None and destination is not None: # from anywhere to ...
         searched_regions = self.proc_mapping
@@ -433,7 +433,7 @@ class PtrFind (gdb.Command):
     destination_start = 0
     destination_end = 0
     # There are some magic keywords that one can use to automatically get the objfile
-    if destination in special_objfiles:      
+    if destination in self.special_objfiles:      
       for objfile in self.proc_mapping:
         if destination == "libc" and "libc.so" in objfile.name \
             or destination == "loader" and "ld-linux" in objfile.name and ".so" in objfile.name \

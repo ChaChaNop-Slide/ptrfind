@@ -43,7 +43,7 @@ class PtrFind (gdb.Command):
                     epilog="""TODO: Explanation of address format\n
                     For more information, check [insert repo url here]""")
     parser.add_argument('find_region', metavar="<destination region>", nargs="?")
-    parser.add_argument('--chain', action='store_true', help="enables leak-chains")
+    parser.add_argument('--chain', nargs="?", const=5, type=int, help="enables leak-chains")
     parser.add_argument('-f', '--from', dest="start_region", metavar="<Search region>", help="Where to look")
     parser.add_argument('-a', "--all", action='store_true', help="print all pointers instead of only the first matches")
     parser.add_argument('-c', "--cache-all", action='store_true', help="also cache the pointers found in writeable sections (faster, but may lead to wrong/incomplete output)")
@@ -126,7 +126,7 @@ class PtrFind (gdb.Command):
     # Step 5: parse mode
     if args.chain:
       leak_chains = self.find_pointer_chains(list(map(PtrFind.objfile_to_id, start)), list(map(PtrFind.objfile_to_id, destination)), is_valid_pointer)
-      self.print_leak_chains(leak_chains, args.all, args.bad_bytes)
+      self.print_leak_chains(leak_chains, args.all, args.bad_bytes, args.chain)
     else:
       searched_regions = None
       destination_regions = None
@@ -168,13 +168,12 @@ class PtrFind (gdb.Command):
     for i in range(0, len(searched_regions)):
         id = searched_regions[i].id
         objfile = self.proc_mapping[id]
-        # Check the cache of each segment
-        for segment in objfile.segments:
-          # Check the cache of the destinations we are looking for
-          for destination in destination_regions:
-            # A counter to determine how many more pointers will be printed
-            ptrs_printed = 0
-            ptrs_omitted = 0
+        # Check the cache of the destinations we are looking for
+        for destination in destination_regions:
+          # A counter to determine how many more pointers will be printed
+          ptrs_printed = 0
+          # Check the cache of each segment
+          for segment in objfile.segments:
             destination_id = destination.id
             for(address, value, symbol_src, symbol_dest) in segment.cache[destination_id]:
               # 1. The value mustn't contain any bad byte
@@ -195,14 +194,10 @@ class PtrFind (gdb.Command):
                   PtrFind.print_msg(f"Pointer(s) found from {PtrFind.COLOR_BOLD}{searched_regions[i].name}{PtrFind.COLOR_RESET} to {PtrFind.COLOR_BOLD}{destination.name}{PtrFind.COLOR_RESET}:")
                 if ptrs_printed < 5 or print_all:
                   print(f"\t{PtrFind.COLOR_BOLD}{hex(address)}{PtrFind.COLOR_RESET}{symbol_src} → {hex(value)}{symbol_dest}")
-                  ptrs_printed += 1
-                else:
-                  ptrs_omitted += 1
-              else:
-                print(f"\t\t[!] Pointer was omitted: {hex(address)} -> {hex(value)}")
-            if ptrs_omitted > 0:
-              print(f"\t({ptrs_omitted} pointer{'s' if ptrs_omitted > 1 else ''} omitted, use -a to show all)")
-            total_pointers += ptrs_printed + ptrs_omitted
+                ptrs_printed += 1
+          if ptrs_printed > 5:
+            print(f"\t({ptrs_printed - 5} pointer{'s' if ptrs_printed > 6 else ''} omitted, use -a to show all)")
+          total_pointers += ptrs_printed
 
     if verbose_print:   
       if total_pointers == 0:
@@ -211,20 +206,24 @@ class PtrFind (gdb.Command):
         PtrFind.print_msg(f"Search done, {total_pointers} pointer{'' if total_pointers == 1 else 's'} found")
       
 
-  def print_leak_chains(self, leak_chains, print_all, bad_bytes):
-    print(f"Bad bytes is {bad_bytes}")
+  def print_leak_chains(self, leak_chains, print_all, bad_bytes, max_chains_printed):
     leak_chains.sort(key=lambda x: len(x))
     if leak_chains == []:
       PtrFind.print_error(f"Search done, no paths were found")
     else:
+      num_chains = 0
       for chain in leak_chains:
-        PtrFind.print_msg(f"Leak-chain found ({len(chain) -1} leak{'s' if len(chain) > 2 else ''}:")
+        if num_chains >= max_chains_printed:
+          PtrFind.print_msg(f"{len(leak_chains) - num_chains} more chains were found but not printed, use --chain <num_chains_printed> to show more")
+          break
+        PtrFind.print_msg(f"Leak-chain found ({len(chain) -1} leak{'s' if len(chain) > 2 else ''}):")
         # Here, we have a list of ids where we step through
         for i in range(0, len(chain)):
           id = chain[i]
           print(f"  → {self.proc_mapping[id].name}")
           if i != len(chain) - 1:
             self.print_pointers([self.proc_mapping[id]], [(self.proc_mapping[chain[i + 1]])], print_all, bad_bytes, verbose_print=False)
+        num_chains += 1
       PtrFind.print_msg(f"Search done, {len(leak_chains)} unique chain{'s were' if len(leak_chains) > 1 else ' was'} found")
 
   

@@ -24,6 +24,45 @@ class PtrFind (gdb.Command):
 
   special_objfiles =  ["heap", "stack", "libc", "image", "loader"]
 
+  __doc__ = f"""
+{COLOR_BOLD}{COLOR_WARNING}ptrfind{COLOR_RESET}{COLOR_BOLD} - helps you find pointers in your binary{COLOR_RESET}
+{COLOR_BOLD}Simple usage:{COLOR_RESET} ptrfind <target region> [-f/--from <start region>]
+
+{COLOR_BOLD}Options:{COLOR_RESET}
+  {COLOR_BOLD}<target region> / <start region>{COLOR_RESET}
+    a memory region. This can either be")
+      - a name of a special region (one of {special_objfiles + ['tls']})
+      - a name of a mapped objfile with or without its path (e.g. \"/usr/lib64/ld-linux-x86-64.so.2\" and \"ld-linux-x86-64.so.2\" will both work.)
+      - a start and end address separated by a minus, e.g. 0x7ffff7fa7000-0x7ffff7fa9000
+      - a start address and size separated by a plus, e.g. 0x7ffff7fa7000+0x2000
+  {COLOR_BOLD}-f / --from <start region>{COLOR_RESET}
+    Where to start looking for pointers
+  {COLOR_BOLD}--chain <#chains printed>{COLOR_RESET}
+    Print leak-chains, with the optional argument specifying how many chains are printed (default: 5)
+
+  {COLOR_BOLD}Advanced options:{COLOR_RESET}
+  {COLOR_BOLD}-a / --all{COLOR_RESET}
+    Print all pointers for a region instead of just the first five
+  {COLOR_BOLD}-b / --bad-bytes{COLOR_RESET}
+    A comma-separated list of hex-values that are not allowed to be in the pointer (e.g. \"00,0a\")
+  {COLOR_BOLD}-c / --cache-all{COLOR_RESET}
+    Also cache the pointers found in writeable sections (faster, but may lead to wrong/incomplete output down the line)
+  {COLOR_BOLD}--clear-cache{COLOR_RESET}
+    Clear the entire cache and re-fetch the process map
+
+  {COLOR_BOLD}Examples:{COLOR_RESET}
+  {COLOR_BOLD}ptrfind libc -a{COLOR_RESET}
+    Print all pointers to the libc found in any memory region
+  {COLOR_BOLD}ptrfind libc --from image{COLOR_RESET}
+    Print 5 pointers from image to the libc
+  {COLOR_BOLD}ptrfind --from image{COLOR_RESET}
+    Print 5 pointers found in the image-region
+  {COLOR_BOLD}ptrfind tls --from image --chain 10 -b 00{COLOR_RESET}
+    Print the 10 shortest leak-chains from the image-region to the tls that don't contain NULL-Bytes in their pointers
+  {COLOR_BOLD}ptrfind 0x7ffff7dc8000-0x7ffff7dd6000 --from libtinfo.so.6.4{COLOR_RESET}
+    Print 5 pointers from the given memory region to the tinfo library
+  """
+
   def __init__ (self):
     super (PtrFind, self).__init__ ("ptrfind", gdb.COMMAND_USER)
 
@@ -52,13 +91,13 @@ class PtrFind (gdb.Command):
                     description='Helps you find pointers in your program.',
                     add_help=False)
     parser.add_argument('find_region', metavar="<destination region>", nargs="?")
-    parser.add_argument('--chain', nargs="?", const=5, type=int, help="enables leak-chains")
-    parser.add_argument('-f', '--from', dest="start_region", metavar="<Search region>", help="Where to look")
-    parser.add_argument('-a', "--all", action='store_true', help="print all pointers instead of only the first matches")
-    parser.add_argument('-c', "--cache-all", action='store_true', help="also cache the pointers found in writeable sections (faster, but may lead to wrong/incomplete output)")
-    parser.add_argument('-b', "--bad-bytes", help="Comma separated list of Hex values that are not allowed to be in the pointer (e.g. \"00,0a\")")
+    parser.add_argument('--chain', nargs="?", const=5, type=int)
+    parser.add_argument('-f', '--from', dest="start_region", metavar="<Search region>")
+    parser.add_argument('-a', "--all", action='store_true')
+    parser.add_argument('-c', "--cache-all", action='store_true')
+    parser.add_argument('-b', "--bad-bytes")
     parser.add_argument('-h', "--help", action="store_true")
-    parser.add_argument("--clear-cache", action='store_true', help="clears the cache")
+    parser.add_argument("--clear-cache", action='store_true')
     
     args = None
     try:
@@ -71,27 +110,7 @@ class PtrFind (gdb.Command):
     self.little_endian = "little endian" in gdb.execute("show endian", to_string=True)
 
     if args.help:
-      print(f"{PtrFind.COLOR_BOLD}{PtrFind.COLOR_WARNING}ptrfind{PtrFind.COLOR_RESET}{PtrFind.COLOR_BOLD} - helps you find pointers in your binary{PtrFind.COLOR_RESET}")
-      print(f"{PtrFind.COLOR_BOLD}Simple usage:{PtrFind.COLOR_RESET} ptrfind <target region> [-f/--from <start region>]")
-      print(f"\n{PtrFind.COLOR_BOLD}Options:{PtrFind.COLOR_RESET}")
-      print(f"  {PtrFind.COLOR_BOLD}<target region> / <start region>{PtrFind.COLOR_RESET}\n    a memory region. This can either be")
-      print(f"\t- a name of a special region (one of {PtrFind.special_objfiles + ['tls']}) ")
-      print("\t- a name of a mapped objfile with or without its path (e.g. \"/usr/lib64/ld-linux-x86-64.so.2\" and \"ld-linux-x86-64.so.2\" will both work.)")
-      print("\t- a start and end address separated by a minus, e.g. 0x7ffff7fa7000-0x7ffff7fa9000")
-      print("\t- a start address and size separated by a plus, e.g. 0x7ffff7fa7000+0x2000")
-      print(f"  {PtrFind.COLOR_BOLD}-f / --from <start region>{PtrFind.COLOR_RESET}\n    Where to start looking for pointers")
-      print(f"  {PtrFind.COLOR_BOLD}--chain <#chains printed>{PtrFind.COLOR_RESET}\n    Print leak-chains, with the optional argument specifying how many chains are printed (default: 5)")
-      print(f"\n{PtrFind.COLOR_BOLD}Advanced options:{PtrFind.COLOR_RESET}")
-      print(f"  {PtrFind.COLOR_BOLD}-a / --all{PtrFind.COLOR_RESET}\n    Print all pointers for a region instead of just the first five")
-      print(f"  {PtrFind.COLOR_BOLD}-b / --bad-bytes{PtrFind.COLOR_RESET}\n    A comma-separated list of hex-values that are not allowed to be in the pointer (e.g. \"00,0a\")")
-      print(f"  {PtrFind.COLOR_BOLD}-c / --cache-all{PtrFind.COLOR_RESET}\n    Also cache the pointers found in writeable sections (faster, but may lead to wrong/incomplete output down the line)")
-      print(f"  {PtrFind.COLOR_BOLD}--clear-cache{PtrFind.COLOR_RESET}\n    Clear the entire cache and re-fetch the process map")
-      print(f"\n{PtrFind.COLOR_BOLD}Examples:{PtrFind.COLOR_RESET}")
-      print(f"  {PtrFind.COLOR_BOLD}ptrfind libc -a{PtrFind.COLOR_RESET}\n    Print all pointers to the libc found in any memory region")
-      print(f"  {PtrFind.COLOR_BOLD}ptrfind libc --from image{PtrFind.COLOR_RESET}\n    Print 5 pointers from image to the libc")
-      print(f"  {PtrFind.COLOR_BOLD}ptrfind --from image{PtrFind.COLOR_RESET}\n    Print 5 pointers found in the image-region")
-      print(f"  {PtrFind.COLOR_BOLD}ptrfind tls --from image --chain 10 -b 00{PtrFind.COLOR_RESET}\n    Print the 10 shortest leak-chains from the image-region to the tls that don't contain NULL-Bytes in their pointers")
-      print(f"  {PtrFind.COLOR_BOLD}ptrfind 0x7ffff7dc8000-0x7ffff7dd6000 --from libtinfo.so.6.4{PtrFind.COLOR_RESET}\n    Print 5 pointers from the given memory region to the tinfo library ")
+      print(self.__doc__)
       return
 
     if self.proc_mapping is not None and self.i_proc_m_output != gdb.execute("info proc mappings", to_string=True):
@@ -441,8 +460,8 @@ class PtrFind (gdb.Command):
     # There are some magic keywords that one can use to automatically get the objfile
     if destination in self.special_objfiles:      
       for objfile in self.proc_mapping:
-        if destination == "libc" and "libc.so" in objfile.name \
-            or destination == "loader" and "ld-linux" in objfile.name and ".so" in objfile.name \
+        if destination == "libc" and (("libc-" in objfile.name and ".so" in objfile.name) or "libc.so" in objfile.name) \
+            or destination == "loader" and (("ld-" in objfile.name and ".so") or "ld.so" in objfile.name) \
             or destination == "heap" and objfile.name == "[heap]" \
             or destination == "stack" and objfile.name == "[stack]" \
             or destination == "image" and objfile.name == gdb.current_progspace().filename:
@@ -470,25 +489,34 @@ class PtrFind (gdb.Command):
       
       tls = PtrFind.get_region(self.proc_mapping, fs_base)
       tls = self.proc_mapping[tls]
-      tls.name = "[tls]"
+      tls.name = f"[tls] ({hex(tls.start)}-{hex(tls.end)})"
       return [tls]
+    
+    # Possiblity: This is the exact name of an objfile mapped in the current program
+    # e.g. "/usr/lib64/ld-linux-x86-64.so.2" and "ld-linux-x86-64.so.2" will both work.
+    for objfile in self.proc_mapping:
+      if destination == objfile.name or ('/' in objfile.name and destination == objfile.name.rsplit('/', 1)[1]):
+        return [objfile]
+
     # Memory range with start-end
-    elif destination.count('-') == 1:
+    if destination.count('-') == 1:
       destination = destination.split("-")
-      destination_start = int(destination[0], 0)
-      destination_end = int(destination[1], 0)
+      try:
+        destination_start = int(destination[0], 0)
+        destination_end = int(destination[1], 0)
+      except Exception as e:
+        PtrFind.print_error(f"Failed to parse memory range: {e}")
+        raise SyntaxError()
     # Memory range with start+size
     elif destination.count('+') == 1:
       destination = destination.split("+")
-      destination_start = int(destination[0], 0)
-      destination_end = destination_start + int(destination[1], 0)
+      try:
+        destination_start = int(destination[0], 0)
+        destination_end = destination_start + int(destination[1], 0)
+      except Exception as e:
+        PtrFind.print_error(f"Failed to parse memory range: {e}")
+        raise SyntaxError()
     else:
-      # Last case: This is the exact name of an objfile mapped in the current program
-      # e.g. "/usr/lib64/ld-linux-x86-64.so.2" and "ld-linux-x86-64.so.2" will both work.
-      for objfile in self.proc_mapping:
-        if destination == objfile.name or ('/' in objfile.name and destination == objfile.name.rsplit('/', 1)[1]):
-          return [objfile]
-        
       # Well, tough luck I guess
       raise SyntaxError()
 

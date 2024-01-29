@@ -6,11 +6,11 @@ Imagine this: You have an arbitrary read/write in a region in your pwn-challenge
 
 ## Features
 - Automatic memory region detection: \
-Don't want to copy-paste the `libc`'s address-range every time? No problem! Keywords like "libc", "loader", "image" and even "tls" are detected automatically, and translated to the respecrive memory-range. Providing the file name or absolute path of a mapped object file also works!
+Don't want to copy-paste the `libc`'s address-range every time? No problem! Keywords like "libc", "loader", "image" and even "tls" are detected automatically, and translated to the respective memory-range. Providing the file name or absolute path of a mapped object file also works!
 - Leak-chains \
 Can't get to your destination directly? With `--chain`, `ptrfind` will locate leak-chains for you, i.e. getting to your location in multiple leaks. Ezpz!
 - Bad Bytes filtering \
-You can only leak pointer without NULL-Bytes? Don't want newlines in your pointer? Give `ptrfind` a list of bad bytes, and you will only get pointers without them.
+You can only leak pointers without NULL-Bytes? Don't want newlines in your pointer? Give `ptrfind` a list of bad bytes, and you will only get pointers without them.
 - Caching \
 The results of read-only pages are automatically cached, so that future executions will be considerably faster! Use `-c` to also cache-writeable pages, or `--clear-cache` to start from scratch.
 - Independent of `gef` or `pwndbg`, also works in vanilla gdb

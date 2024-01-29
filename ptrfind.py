@@ -184,8 +184,8 @@ class PtrFind (gdb.Command):
     # Step 5: parse mode
     if args.chain:
       # Leak chains
-      if start is None:
-        PtrFind.print_error("-f/--from is missing")
+      if start is None or destination is None:
+        PtrFind.print_error("Missing start and/or destination range")
         return
       PtrFind.print_msg("Searching for leak-chains, this may take a few minutes")
       leak_chains = self.find_pointer_chains(list(map(PtrFind.objfile_to_id, start)), list(map(PtrFind.objfile_to_id, destination)), is_valid_pointer)

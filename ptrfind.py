@@ -40,7 +40,7 @@ class PtrFind (gdb.Command):
   {COLOR_BOLD}--chain <#chains printed>{COLOR_RESET}
     Print leak-chains, with the optional argument specifying how many chains are printed (default: 5)
 
-  {COLOR_BOLD}Advanced options:{COLOR_RESET}
+{COLOR_BOLD}Advanced options:{COLOR_RESET}
   {COLOR_BOLD}-a / --all{COLOR_RESET}
     Print all pointers for a region instead of just the first five
   {COLOR_BOLD}-b / --bad-bytes{COLOR_RESET}
@@ -50,7 +50,7 @@ class PtrFind (gdb.Command):
   {COLOR_BOLD}--clear-cache{COLOR_RESET}
     Clear the entire cache and re-fetch the process map
 
-  {COLOR_BOLD}Examples:{COLOR_RESET}
+{COLOR_BOLD}Examples:{COLOR_RESET}
   {COLOR_BOLD}ptrfind libc -a{COLOR_RESET}
     Print all pointers to the libc found in any memory region
   {COLOR_BOLD}ptrfind libc --from image{COLOR_RESET}

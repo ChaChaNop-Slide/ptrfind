@@ -8,7 +8,7 @@ except (ImportError, ModuleNotFoundError):
 import argparse
 from types import SimpleNamespace
 import copy
-import time
+import struct
 
 class PtrFind (gdb.Command):
   COLOR_OK = "\033[92m"  # GREEN
@@ -43,6 +43,8 @@ class PtrFind (gdb.Command):
 {COLOR_BOLD}Advanced options:{COLOR_RESET}
   {COLOR_BOLD}-a / --all{COLOR_RESET}
     Print all pointers for a region instead of just the first five
+  {COLOR_BOLD}-o / --use-offsets{COLOR_RESET}
+    Don't print the absolute addresses, but their relative offset
   {COLOR_BOLD}-b / --bad-bytes{COLOR_RESET}
     A comma-separated list of hex-values that are not allowed to be in the pointer (e.g. \"00,0a\")
   {COLOR_BOLD}-c / --cache-all{COLOR_RESET}
@@ -96,6 +98,7 @@ class PtrFind (gdb.Command):
     parser.add_argument('-a', "--all", action='store_true')
     parser.add_argument('-c', "--cache-all", action='store_true')
     parser.add_argument('-b', "--bad-bytes")
+    parser.add_argument('-o', '--use-offsets', action="store_true")
     parser.add_argument('-h', "--help", action="store_true")
     parser.add_argument("--clear-cache", action='store_true')
     
@@ -155,7 +158,7 @@ class PtrFind (gdb.Command):
       args.bad_bytes = list(map(lambda hexstr: int("0x"+hexstr, 16) & 0xFF, args.bad_bytes))
 
     def is_valid_pointer(addr, val, from_start, to_end):
-      '''A function that is called to check if a pointer fits our criteria (in start region, in end region, has bad byte)'''
+      '''A closure that is called to check if a pointer fits our criteria (in start region, in end region, has bad byte)'''
       # Is there a bad byte?
       if PtrFind.contains_bad_bytes(val,args.bad_bytes):
         return False
@@ -189,7 +192,7 @@ class PtrFind (gdb.Command):
         return
       PtrFind.print_msg("Searching for leak-chains, this may take a few minutes")
       leak_chains = self.find_pointer_chains(list(map(PtrFind.objfile_to_id, start)), list(map(PtrFind.objfile_to_id, destination)), is_valid_pointer)
-      self.print_leak_chains(leak_chains, args.all, args.bad_bytes, args.chain)
+      self.print_leak_chains(leak_chains, args.all, args.bad_bytes, args.chain, args.use_offsets)
     else:
       # Searching for pointers
       searched_regions = None
@@ -213,7 +216,7 @@ class PtrFind (gdb.Command):
       memory_errors = self.find_pointers(list(map(PtrFind.objfile_to_id, searched_regions)))
 
       # Now, go through the caches
-      self.print_pointers(searched_regions, destination_regions, args.all, args.bad_bytes)
+      self.print_pointers(searched_regions, destination_regions, args.all, args.bad_bytes, args.use_offsets)
       
       if memory_errors > 0:
         PtrFind.print_error(f"{memory_errors} {'address' if memory_errors == 1 else 'addresses'} could not be accessed due to a memory error.")
@@ -226,7 +229,7 @@ class PtrFind (gdb.Command):
             segment.cache = None
 
 
-  def print_pointers(self, searched_regions, destination_regions, print_all, bad_bytes, verbose_print=True):
+  def print_pointers(self, searched_regions, destination_regions, print_all, bad_bytes, use_offsets, verbose_print=True):
     '''Print the result of a pointer search'''
     total_pointers = 0
     # Go through all searched regions
@@ -254,7 +257,9 @@ class PtrFind (gdb.Command):
                   PtrFind.print_msg(f"Pointer(s) found from {PtrFind.COLOR_BOLD}{searched_regions[i].name}{PtrFind.COLOR_RESET} to {PtrFind.COLOR_BOLD}{destination.name}{PtrFind.COLOR_RESET}:")
                 # a maximum of 5 pointers will be printed
                 if ptrs_printed < 5 or print_all:
-                  print(f"\t{PtrFind.COLOR_BOLD}{hex(address)}{PtrFind.COLOR_RESET}{symbol_src} → {hex(value)}{symbol_dest}")
+                  address_str = hex(address) if not use_offsets else objfile.short_name + '+' + hex(address - objfile.start)
+                  value_str = hex(value) if not use_offsets else destination.short_name + '+' + hex(value - destination.start)
+                  print(f"\t{PtrFind.COLOR_BOLD}{address_str}{PtrFind.COLOR_RESET}{symbol_src} → {value_str}{symbol_dest}")
                 ptrs_printed += 1
           # Inform the user if we omitted pointers
           if ptrs_printed > 5:
@@ -269,7 +274,7 @@ class PtrFind (gdb.Command):
         PtrFind.print_msg(f"Search done, {total_pointers} pointer{'' if total_pointers == 1 else 's'} found")
       
 
-  def print_leak_chains(self, leak_chains, print_all, bad_bytes, max_chains_printed):
+  def print_leak_chains(self, leak_chains, print_all, bad_bytes, max_chains_printed, use_offsets):
     '''Receives the result of a leak-chain search, and prints them'''
     # First, sort by the number of leaks required. The shorter, the better
     leak_chains.sort(key=lambda x: len(x))
@@ -289,7 +294,7 @@ class PtrFind (gdb.Command):
           print(f"  → {self.proc_mapping[id].name}")
           # If it is not the final step, print the pointers that go into the next section
           if i != len(chain) - 1:
-            self.print_pointers([self.proc_mapping[id]], [(self.proc_mapping[chain[i + 1]])], print_all, bad_bytes, verbose_print=False)
+            self.print_pointers([self.proc_mapping[id]], [(self.proc_mapping[chain[i + 1]])], print_all, bad_bytes, use_offsets, verbose_print=False)
         num_chains += 1
       PtrFind.print_msg(f"Search done, {len(leak_chains)} unique chain{'s were' if len(leak_chains) > 1 else ' was'} found")
 
@@ -448,10 +453,7 @@ class PtrFind (gdb.Command):
 
   def deref(self, addr):
     '''Returns the value at the provided address, or throws a gdb.MemoryError if the address is invalid'''
-    return int.from_bytes(PtrFind.memory_dump(addr, self.pointer_size), "little" if self.little_endian else "big")
-  
-  def memory_dump(addr, length):
-    return gdb.selected_inferior().read_memory(addr, length).tobytes()
+    return int.from_bytes(( gdb.selected_inferior().read_memory(addr, self.pointer_size).tobytes() ), "little" if self.little_endian else "big")
 
   def parse_addr_region(self, destination):     
     '''Receives a user-provided region string and returns a subset of the proc_mapping that represents the search region'''
@@ -495,7 +497,7 @@ class PtrFind (gdb.Command):
     # Possiblity: This is the exact name of an objfile mapped in the current program
     # e.g. "/usr/lib64/ld-linux-x86-64.so.2" and "ld-linux-x86-64.so.2" will both work.
     for objfile in self.proc_mapping:
-      if destination == objfile.name or ('/' in objfile.name and destination == objfile.name.rsplit('/', 1)[1]):
+      if destination == objfile.name or destination == objfile.short_name:
         return [objfile]
 
     # Memory range with start-end
@@ -580,12 +582,16 @@ class PtrFind (gdb.Command):
           objfiles.append(current_objfile)
         
         new_name = ''
+        short_name = ''
         if len(line_entries) == 6:
           new_name = line_entries[5]
+          # The short name should be just the filename, iff the name is an absolute path. Else, it is the same as the name
+          short_name = new_name.rsplit('/', 1)[1] if '/' in new_name else new_name
 
         current_objfile = SimpleNamespace(
-          name=new_name,
-          segments=[],
+          name = new_name,
+          short_name = short_name,
+          segments = [],
           start = segment.start,
           end = segment.end,
           id = len(objfiles)
@@ -593,6 +599,7 @@ class PtrFind (gdb.Command):
       
       if current_objfile.name == "":
         current_objfile.name = f"[{hex(current_objfile.start)}-{hex(current_objfile.end)}]"
+        current_objfile.short_name = current_objfile.name
       current_objfile.end = segment.end
       current_objfile.segments.append(segment)
     self.proc_mapping = objfiles
@@ -602,9 +609,7 @@ class PtrFind (gdb.Command):
       read = prems_str[0] == 'r',
       write = prems_str[1] == 'w',
       execute = prems_str[2] == 'x'
-    )  
-    
-    
+    )   
 
 
 PtrFind ()

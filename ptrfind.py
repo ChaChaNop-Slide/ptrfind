@@ -602,6 +602,11 @@ class PtrFind (gdb.Command):
         current_objfile.short_name = current_objfile.name
       current_objfile.end = segment.end
       current_objfile.segments.append(segment)
+
+    # The last parsed objfile is not added to the list yet
+    if current_objfile is not None:
+      objfiles.append(current_objfile)
+
     self.proc_mapping = objfiles
     
   def parse_page_permissions(prems_str):

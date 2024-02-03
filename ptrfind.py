@@ -20,6 +20,7 @@ class PtrFind (gdb.Command):
   little_endian = None
   pointer_size = None
   proc_mapping = None
+  executable_name = None
   i_proc_m_output = None
 
   special_objfiles =  ["heap", "stack", "libc", "image", "loader"]
@@ -119,9 +120,11 @@ class PtrFind (gdb.Command):
     if self.proc_mapping is not None and self.i_proc_m_output != gdb.execute("info proc mappings", to_string=True):
       PtrFind.print_warning("the process map was updated (e.g. new permissions, new pages mapped). Cache has been cleared.")
       self.proc_mapping = None
+      self.executable_name = None
     
     if args.clear_cache:
       self.proc_mapping = None
+      self.executable_name = None
       PtrFind.print_msg("Cache has been cleared")
 
     # Step 1: If the cache is empty, create a proc mapping
@@ -466,9 +469,9 @@ class PtrFind (gdb.Command):
             or destination == "loader" and (("ld-" in objfile.name and ".so") or "ld.so" in objfile.name) \
             or destination == "heap" and objfile.name == "[heap]" \
             or destination == "stack" and objfile.name == "[stack]" \
-            or destination == "image" and objfile.name == gdb.current_progspace().filename:
+            or destination == "image" and objfile.name == self.executable_name:
           return [objfile]
-      PtrFind.print_error("Failed to find region, please use address ranges manually")
+      PtrFind.print_error("Failed to find region, please use address ranges manually or provide the filename")
       raise SyntaxError()
     # "tls" requires extra handling, so it is in an extra if-clause
     elif destination == "tls":
@@ -608,6 +611,16 @@ class PtrFind (gdb.Command):
       objfiles.append(current_objfile)
 
     self.proc_mapping = objfiles
+
+    # Attempt to get the executable filename, so that "image" works. On some remote targets, this will fail
+    if gdb.current_progspace().filename is None:
+      PtrFind.print_warning("Failed to determine the running executable name. Note that \"image\" won't work in this session")
+      self.executable_name = None
+    else:
+      self.executable_name = gdb.current_progspace().filename
+      # In case we're in a remote gdb session, we want to remove the target-prefix
+      if self.executable_name.startswith("target:"):
+        self.executable_name = self.executable_name[len("target:"):]
     
   def parse_page_permissions(prems_str):
     return SimpleNamespace(

@@ -216,13 +216,10 @@ class PtrFind (gdb.Command):
       PtrFind.print_msg("Searching for pointers, this may take a few minutes")
       
       # Fill the cache of those regions
-      memory_errors = self.find_pointers(list(map(PtrFind.objfile_to_id, searched_regions)))
+      self.find_pointers(list(map(PtrFind.objfile_to_id, searched_regions)))
 
       # Now, go through the caches
       self.print_pointers(searched_regions, destination_regions, args.all, args.bad_bytes, args.use_offsets)
-      
-      if memory_errors > 0:
-        PtrFind.print_error(f"{memory_errors} {'address' if memory_errors == 1 else 'addresses'} could not be accessed due to a memory error.")
 
     # Clear the cache for writeable pages
     if not args.cache_all:
@@ -366,7 +363,6 @@ class PtrFind (gdb.Command):
 
   def find_pointers(self, ids_to_scan):
     '''Receives an array of section id's (aka. indexes) and fills their caches by scanning their memory and looking for pointers. If a cache is not empty, it is skipped'''
-    memory_errors = 0
     # For every id
     for id in ids_to_scan:
       objfile = self.proc_mapping[id]
@@ -380,23 +376,27 @@ class PtrFind (gdb.Command):
         segment.cache = []
         for i in range(0, len(self.proc_mapping)):
           segment.cache.append([])
+
+        # Skip guard pages
+        if not segment.permissions.read and not segment.permissions.write and not segment.permissions.execute:
+          continue
         
         # Now, walk through the entire memory
-        memory_view = gdb.selected_inferior().read_memory(segment.start, segment.end - segment.start)
+        try:
+          memory_view = gdb.selected_inferior().read_memory(segment.start, segment.end - segment.start)
+        except gdb.MemoryError as e:
+          PtrFind.print_error(f"Memory access in range [{hex(segment.start)}-{hex(segment.end)}] failed. Reason: {e}")
+          continue
+        
         for i in range(0, segment.end-segment.start, self.pointer_size):
           address = segment.start + i
-          try:
-            val = int.from_bytes(memory_view[i : i+8], "little" if self.little_endian else "big")
-          except gdb.MemoryError:
-            memory_errors += 1
-            continue
+          val = int.from_bytes(memory_view[i : i+8], "little" if self.little_endian else "big")
             
           # This call returns the region index in the proc_mapping, or None if the value is not a pointer
           region_index = PtrFind.get_region(self.proc_mapping, val)
           if region_index is not None:
             # We found a pointer! cache it
             segment.cache[region_index].append((address, val, PtrFind.get_symbol(address), PtrFind.get_symbol(val)))
-    return memory_errors
 
 
   def verify_caches(self):
@@ -566,6 +566,9 @@ class PtrFind (gdb.Command):
     
     for line in mappings_output:
       line_entries = list(filter(lambda x: x != '' and x != '\t' , line.split(" ")))
+      # [vvar] cannot be read from gdb, so we skip it entirely
+      if len(line_entries) >= 6 and line_entries[5] == "[vvar]":
+        continue
 
       segment = SimpleNamespace(
         start = int(line_entries[0],16),

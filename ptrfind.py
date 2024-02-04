@@ -382,9 +382,11 @@ class PtrFind (gdb.Command):
           segment.cache.append([])
         
         # Now, walk through the entire memory
-        for address in range(segment.start, segment.end, self.pointer_size):
+        memory_view = gdb.selected_inferior().read_memory(segment.start, segment.end - segment.start)
+        for i in range(0, segment.end-segment.start, self.pointer_size):
+          address = segment.start + i
           try:
-            val = self.deref(address)
+            val = int.from_bytes(memory_view[i : i+8], "little" if self.little_endian else "big")
           except gdb.MemoryError:
             memory_errors += 1
             continue
@@ -452,11 +454,6 @@ class PtrFind (gdb.Command):
           if addr < m.end and addr >= m.start:
             return i
       return None
-
-
-  def deref(self, addr):
-    '''Returns the value at the provided address, or throws a gdb.MemoryError if the address is invalid'''
-    return int.from_bytes(( gdb.selected_inferior().read_memory(addr, self.pointer_size).tobytes() ), "little" if self.little_endian else "big")
 
   def parse_addr_region(self, destination):     
     '''Receives a user-provided region string and returns a subset of the proc_mapping that represents the search region'''

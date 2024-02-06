@@ -257,7 +257,7 @@ class PtrFind (gdb.Command):
                   PtrFind.print_msg(f"Pointer(s) found from {PtrFind.COLOR_BOLD}{searched_regions[i].name}{PtrFind.COLOR_RESET} to {PtrFind.COLOR_BOLD}{destination.name}{PtrFind.COLOR_RESET}:")
                 # a maximum of 5 pointers will be printed
                 if ptrs_printed < 5 or print_all:
-                  address_str = hex(address) if not use_offsets else objfile.short_name + '+' + hex(address - objfile.start)
+                  address_str = hex(address) if not use_offsets else searched_regions[i].short_name + '+' + hex(address - searched_regions[i].start)
                   value_str = hex(value) if not use_offsets else destination.short_name + '+' + hex(value - destination.start)
                   print(f"\t{PtrFind.COLOR_BOLD}{address_str}{PtrFind.COLOR_RESET}{symbol_src} → {value_str}{symbol_dest}")
                 ptrs_printed += 1
@@ -537,12 +537,13 @@ class PtrFind (gdb.Command):
     if(len(destination_mapping) == 0):
       PtrFind.print_error("Provided address range is completely unmapped")
       raise SyntaxError
- 
-    # Change the name
-    for objfile in destination_mapping:
-      objfile.name = "user-defined region in " + objfile.name    
+
     destination_mapping[0].start = destination_start
     destination_mapping[len(destination_mapping )-1].end = destination_end
+    # Change the name
+    for objfile in destination_mapping:
+      objfile.name = "user-defined region in " + objfile.name   
+      objfile.short_name = f"[{hex(objfile.start)}]" 
     return destination_mapping 
     
 

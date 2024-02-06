@@ -466,6 +466,10 @@ class PtrFind (gdb.Command):
             return i
       return None
 
+  def deref(self, addr):
+    '''Returns the value at the provided address, or throws a gdb.MemoryError if the address is invalid'''
+    return int.from_bytes(( gdb.selected_inferior().read_memory(addr, self.pointer_size).tobytes() ), "little" if self.little_endian else "big")
+
   def parse_addr_region(self, destination):     
     '''Receives a user-provided region string and returns a subset of the proc_mapping that represents the search region'''
     destination_start = 0

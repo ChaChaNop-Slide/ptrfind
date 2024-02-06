@@ -372,31 +372,42 @@ class PtrFind (gdb.Command):
         if segment.cache is not None:
           continue
 
-        # Initialise the cache with empty arrays
-        segment.cache = []
-        for i in range(0, len(self.proc_mapping)):
-          segment.cache.append([])
-
-        # Skip guard pages
-        if not segment.permissions.read and not segment.permissions.write and not segment.permissions.execute:
-          continue
-        
-        # Now, walk through the entire memory
         try:
-          memory_view = gdb.selected_inferior().read_memory(segment.start, segment.end - segment.start)
-        except gdb.MemoryError as e:
-          PtrFind.print_error(f"Memory access in range [{hex(segment.start)}-{hex(segment.end)}] failed. Reason: {e}")
-          continue
-        
-        for i in range(0, segment.end-segment.start, self.pointer_size):
-          address = segment.start + i
-          val = int.from_bytes(memory_view[i : i+8], "little" if self.little_endian else "big")
-            
-          # This call returns the region index in the proc_mapping, or None if the value is not a pointer
-          region_index = PtrFind.get_region(self.proc_mapping, val)
-          if region_index is not None:
-            # We found a pointer! cache it
-            segment.cache[region_index].append((address, val, PtrFind.get_symbol(address), PtrFind.get_symbol(val)))
+          # Initialise the cache with empty arrays
+          segment.cache = []
+          for i in range(0, len(self.proc_mapping)):
+            segment.cache.append([])
+
+          # Skip guard pages
+          if not segment.permissions.read and not segment.permissions.write and not segment.permissions.execute:
+            continue
+          
+          # Now, walk through the entire memory
+          try:
+            memory_view = gdb.selected_inferior().read_memory(segment.start, segment.end - segment.start)
+          except gdb.MemoryError as e:
+            PtrFind.print_error(f"Memory access in range [{hex(segment.start)}-{hex(segment.end)}] failed. Reason: {e}")
+            continue
+          
+          for i in range(0, segment.end-segment.start, self.pointer_size):
+            address = segment.start + i
+            val = int.from_bytes(memory_view[i : i+8], "little" if self.little_endian else "big")
+              
+            # This call returns the region index in the proc_mapping, or None if the value is not a pointer
+            region_index = PtrFind.get_region(self.proc_mapping, val)
+            if region_index is not None:
+              # We found a pointer! cache it
+              segment.cache[region_index].append((address, val, PtrFind.get_symbol(address), PtrFind.get_symbol(val)))
+        except KeyboardInterrupt as e:
+          '''
+          The user Ctrl+C'ed us while we were in the middle of filling a cache
+          This must be handled, as simply returning would leave the cache in an incomplete state
+          To make sure that the results will not be wrong afterwards, the cache of the current segment will
+          be cleared completely
+          '''
+          segment.cache = None
+          PtrFind.print_warning("Search aborted")  
+          raise e
 
 
   def verify_caches(self):

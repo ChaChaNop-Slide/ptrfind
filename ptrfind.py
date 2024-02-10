@@ -487,24 +487,26 @@ class PtrFind (gdb.Command):
       raise SyntaxError()
     # "tls" requires extra handling, so it is in an extra if-clause
     elif destination == "tls":
-      # Our tls detection only works on x86-64
+      # Our tls detection only works on x86-64 and aarch64
       frame = gdb.newest_frame()
-      if frame.architecture().name() != "i386:x86-64":
-        PtrFind.print_error(f"TLS is currently only supported on x86-64 (found {frame.architecture().name()}), please use manual address ranges")
+      arch = frame.architecture().name()
+      if arch not in ["i386:x86-64", "aarch64"]:
+        PtrFind.print_error(f"TLS detection is currently unsupported on this architecture (detected \"{frame.architecture().name()}\"), please use manual address ranges")
         raise SyntaxError()
       
-      # Oh and it only works if $fs_base is used as the tls base
-      fs_base = frame.read_register("fs_base").const_value()
+      # Oh and it only works on x86_64 if $fs_base is used as the tls base
+      tls_reg = "fs_base" if arch == "i386:x86-64" else "tpidr"
+      tls_addr = frame.read_register(tls_reg).const_value()
       try:
-        val = self.deref(fs_base)
+        val = self.deref(tls_addr)
       except gdb.MemoryError:
-        PtrFind.print_error("Failed to find TLS. Reason: $fs_base points to an invalid address. Please use manual address ranges")
+        PtrFind.print_error(f"Failed to find TLS. Reason: ${tls_reg} points to an invalid address. Please use manual address ranges")
         raise SyntaxError
 
-      if val != fs_base:
+      if arch == "i386:x86-64" and val != tls_addr:
         PtrFind.print_warning("TLS parsing might have failed, proceed with caution. Reason: Start of TLS does not contain a self-reference")
       
-      tls = PtrFind.get_region(self.proc_mapping, fs_base)
+      tls = PtrFind.get_region(self.proc_mapping, tls_addr)
       tls = self.proc_mapping[tls]
       tls.name = f"[tls] ({hex(tls.start)}-{hex(tls.end)})"
       return [tls]

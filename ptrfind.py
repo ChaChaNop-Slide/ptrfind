@@ -262,7 +262,7 @@ class PtrFind (gdb.Command):
                   print(f"\t{PtrFind.COLOR_BOLD}{address_str}{PtrFind.COLOR_RESET}{symbol_src} → {value_str}{symbol_dest}")
                 ptrs_printed += 1
           # Inform the user if we omitted pointers
-          if ptrs_printed > 5:
+          if ptrs_printed > 5 and not print_all:
             print(f"\t({ptrs_printed - 5} pointer{'s' if ptrs_printed > 6 else ''} omitted, use -a to show all)")
           total_pointers += ptrs_printed
 

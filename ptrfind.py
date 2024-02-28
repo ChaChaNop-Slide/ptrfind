@@ -31,7 +31,7 @@ class PtrFind (gdb.Command):
 
 {COLOR_BOLD}Options:{COLOR_RESET}
   {COLOR_BOLD}<target region> / <start region>{COLOR_RESET}
-    a memory region. This can either be")
+    a memory region. This can either be
       - a name of a special region (one of {special_objfiles + ['tls']})
       - a name of a mapped objfile with or without its path (e.g. \"/usr/lib64/ld-linux-x86-64.so.2\" and \"ld-linux-x86-64.so.2\" will both work.)
       - a start and end address separated by a minus, e.g. 0x7ffff7fa7000-0x7ffff7fa9000

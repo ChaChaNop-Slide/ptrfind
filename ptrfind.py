@@ -106,7 +106,8 @@ class PtrFind (gdb.Command):
     args = None
     try:
       args = parser.parse_args(gdb.string_to_argv(arg))
-    except Exception:
+    # BaseException also catches the SystemExit raised by argparse on error
+    except BaseException as e:
       PtrFind.print_error(f"Option parsing failed")
       return
     
